@@ -1,7 +1,20 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [[ -f "${SCRIPT_DIR}/../scripts/doctor.sh" ]]; then
+  ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+else
+  ROOT_DIR="${GORKY_HOME:-$HOME/nanoclaw}"
+fi
+
+if [[ ! -d "$ROOT_DIR" || ! -f "$ROOT_DIR/scripts/doctor.sh" ]]; then
+  echo "Could not locate NanoClaw repo."
+  echo "Set GORKY_HOME to your repo path, e.g.:"
+  echo "export GORKY_HOME=~/nanoclaw"
+  exit 1
+fi
+
 cd "$ROOT_DIR"
 
 cmd="${1:-start}"
