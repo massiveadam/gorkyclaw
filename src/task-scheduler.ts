@@ -26,8 +26,8 @@ export interface SchedulerDependencies {
   sendMessage: (jid: string, text: string) => Promise<void>;
   registeredGroups: () => Record<string, RegisteredGroup>;
   getSessions: () => Record<string, string>;
-  queue: GroupQueue;
-  onProcess: (groupJid: string, proc: ChildProcess, containerName: string) => void;
+  queue?: GroupQueue;
+  onProcess?: (groupJid: string, proc: ChildProcess, containerName: string) => void;
 }
 
 async function runTask(
@@ -99,7 +99,7 @@ async function runTask(
         chatJid: task.chat_jid,
         isMain,
       },
-      (proc, containerName) => deps.onProcess(task.chat_jid, proc, containerName),
+      (proc, containerName) => deps.onProcess?.(task.chat_jid, proc, containerName),
     );
 
     if (output.status === 'error') {
@@ -175,11 +175,15 @@ export function startSchedulerLoop(deps: SchedulerDependencies): void {
           continue;
         }
 
-        deps.queue.enqueueTask(
-          currentTask.chat_jid,
-          currentTask.id,
-          () => runTask(currentTask, deps),
-        );
+        if (deps.queue) {
+          deps.queue.enqueueTask(
+            currentTask.chat_jid,
+            currentTask.id,
+            () => runTask(currentTask, deps),
+          );
+        } else {
+          void runTask(currentTask, deps);
+        }
       }
     } catch (err) {
       logger.error({ err }, 'Error in scheduler loop');

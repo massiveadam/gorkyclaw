@@ -3,7 +3,7 @@
  * Executes approved actions via SSH with restricted keys
  */
 
-import { createHmac } from 'crypto';
+import { createHmac, randomUUID } from 'crypto';
 import { RunJobRequestSchema, type Action, type Job } from './types.js';
 import { JobsDatabase } from './db.js';
 
@@ -18,6 +18,15 @@ const DEFAULT_TIMEOUT = parseInt(process.env.DEFAULT_TIMEOUT || '60');
 const WEBHOOK_SECRET = process.env.OPS_RUNNER_WEBHOOK_SECRET || '';
 const SSH_STRICT_HOST_KEY_CHECKING =
   process.env.SSH_STRICT_HOST_KEY_CHECKING || 'accept-new';
+const IMAGE_TO_TEXT_URL = process.env.IMAGE_TO_TEXT_URL || '';
+const IMAGE_TO_TEXT_TOKEN = process.env.IMAGE_TO_TEXT_TOKEN || '';
+const VOICE_TO_TEXT_URL = process.env.VOICE_TO_TEXT_URL || '';
+const VOICE_TO_TEXT_TOKEN = process.env.VOICE_TO_TEXT_TOKEN || '';
+const OPENCODE_SERVE_URL = process.env.OPENCODE_SERVE_URL || '';
+const OPENCODE_SERVE_TOKEN = process.env.OPENCODE_SERVE_TOKEN || '';
+const DISPATCH_MAX_PARALLEL = parseInt(
+  process.env.DISPATCH_MAX_PARALLEL || '4',
+);
 
 if (!SHARED_SECRET) {
   throw new Error('OPS_RUNNER_SHARED_SECRET required');
@@ -31,6 +40,7 @@ const TARGET_IPS: Record<string, string> = {
 
 // Initialize database
 const db = new JobsDatabase();
+const backgroundRunAbortControllers = new Map<string, AbortController>();
 
 // Validate SSH key exists
 try {
@@ -69,6 +79,20 @@ const server = Bun.serve({
     // New dispatch endpoint (orchestrator -> runner)
     if (url.pathname === '/dispatch' && request.method === 'POST') {
       return handleDispatch(request);
+    }
+
+    if (url.pathname === '/runs' && request.method === 'GET') {
+      return handleListRuns(request);
+    }
+
+    const runMatch = url.pathname.match(/^\/runs\/([A-Za-z0-9-]+)$/);
+    if (runMatch && request.method === 'GET') {
+      return handleGetRun(request, runMatch[1]);
+    }
+
+    const cancelMatch = url.pathname.match(/^\/runs\/([A-Za-z0-9-]+)\/cancel$/);
+    if (cancelMatch && request.method === 'POST') {
+      return handleCancelRun(request, cancelMatch[1]);
     }
 
     return new Response('Not Found', { status: 404 });
@@ -168,9 +192,17 @@ interface DispatchRequest {
     target?: string;
     command?: string;
     url?: string;
+    imageUrl?: string;
+    audioUrl?: string;
+    task?: string;
+    cwd?: string;
+    prompt?: string;
+    language?: string;
     mode?: 'http' | 'browser';
     extract?: string;
     timeout?: number;
+    executionMode?: 'foreground' | 'background';
+    parallelGroup?: string;
     id?: string;
   }>;
 }
@@ -187,6 +219,67 @@ function verifyDispatchSignature(request: Request, body: string): boolean {
   const actual = signature.slice('sha256='.length);
   const expected = buildSignature(ts, body, WEBHOOK_SECRET);
   return actual === expected;
+}
+
+function verifyRunnerApiSecret(request: Request): boolean {
+  const secret = request.headers.get('x-ops-runner-secret') || '';
+  return Boolean(secret) && secret === SHARED_SECRET;
+}
+
+function runRowToApi(row: Record<string, unknown>) {
+  return {
+    id: String(row.id),
+    actionType: String(row.action_type),
+    status: String(row.status),
+    createdAt: String(row.created_at),
+    startedAt: row.started_at ? String(row.started_at) : null,
+    completedAt: row.completed_at ? String(row.completed_at) : null,
+    summary: row.summary ? String(row.summary) : null,
+    result: row.result_text ? String(row.result_text) : null,
+    error: row.error_text ? String(row.error_text) : null,
+    cancelRequested: Boolean(row.cancel_requested),
+  };
+}
+
+async function handleListRuns(request: Request): Promise<Response> {
+  if (!verifyRunnerApiSecret(request)) {
+    return jsonResponse({ success: false, error: 'Unauthorized' }, 401);
+  }
+  const limit = Math.max(
+    1,
+    Math.min(100, parseInt(new URL(request.url).searchParams.get('limit') || '20', 10) || 20),
+  );
+  const runs = db.listRuns(limit).map(runRowToApi);
+  return jsonResponse({ success: true, runs });
+}
+
+async function handleGetRun(request: Request, runId: string): Promise<Response> {
+  if (!verifyRunnerApiSecret(request)) {
+    return jsonResponse({ success: false, error: 'Unauthorized' }, 401);
+  }
+  const run = db.getRun(runId);
+  if (!run) return jsonResponse({ success: false, error: 'Run not found' }, 404);
+  return jsonResponse({ success: true, run: runRowToApi(run) });
+}
+
+async function handleCancelRun(request: Request, runId: string): Promise<Response> {
+  if (!verifyRunnerApiSecret(request)) {
+    return jsonResponse({ success: false, error: 'Unauthorized' }, 401);
+  }
+  const existing = db.getRun(runId);
+  if (!existing) return jsonResponse({ success: false, error: 'Run not found' }, 404);
+  db.updateRun(runId, { cancelRequested: true });
+  const controller = backgroundRunAbortControllers.get(runId);
+  if (controller) {
+    controller.abort();
+    db.updateRun(runId, {
+      status: 'cancelled',
+      completedAt: new Date().toISOString(),
+      errorText: 'Cancelled by operator request.',
+    });
+    backgroundRunAbortControllers.delete(runId);
+  }
+  return jsonResponse({ success: true, runId, cancelled: Boolean(controller) });
 }
 
 async function handleDispatch(request: Request): Promise<Response> {
@@ -207,42 +300,7 @@ async function handleDispatch(request: Request): Promise<Response> {
 
     console.log(`▶️ Dispatch ${body.dispatchId}: ${body.actions.length} action(s)`);
 
-    const results: ExecutionResult[] = [];
-    for (const action of body.actions) {
-      if (action.type === 'ssh') {
-        results.push(
-          await executeSSHAction(
-            action as Extract<Action, { type: 'ssh' }>,
-            Date.now(),
-            new Date().toISOString(),
-          ),
-        );
-        continue;
-      }
-
-      if (action.type === 'web_fetch') {
-        results.push(
-          await executeWebFetchAction(
-            action as DispatchWebFetchAction,
-            Date.now(),
-            new Date().toISOString(),
-          ),
-        );
-        continue;
-      }
-
-      if (action.type !== 'ssh') {
-        results.push({
-          actionId: action.id || 'unknown',
-          stdout: '',
-          stderr: `Unsupported action type: ${action.type}`,
-          exitCode: 1,
-          executedAt: new Date().toISOString(),
-          durationMs: 0,
-        });
-        continue;
-      }
-    }
+    const results = await executeDispatchActions(body.actions);
 
     return jsonResponse({
       success: true,
@@ -258,6 +316,91 @@ async function handleDispatch(request: Request): Promise<Response> {
       500,
     );
   }
+}
+
+async function executeDispatchActions(actions: DispatchRequest['actions']): Promise<ExecutionResult[]> {
+  const indexed = actions.map((action, index) => ({ action, index }));
+  const results: ExecutionResult[] = new Array(actions.length);
+
+  // Default behavior remains serial; only actions with parallelGroup run concurrently.
+  const serial = indexed.filter(({ action }) => !action.parallelGroup);
+  for (const { action, index } of serial) {
+    results[index] = await executeDispatchAction(action);
+  }
+
+  const groupedMap = new Map<string, Array<{ action: DispatchRequest['actions'][number]; index: number }>>();
+  for (const item of indexed) {
+    if (!item.action.parallelGroup) continue;
+    const key = item.action.parallelGroup;
+    const list = groupedMap.get(key) || [];
+    list.push(item);
+    groupedMap.set(key, list);
+  }
+
+  const grouped = [...groupedMap.values()].flat();
+  if (grouped.length > 0) {
+    let cursor = 0;
+    while (cursor < grouped.length) {
+      const batch = grouped.slice(cursor, cursor + Math.max(1, DISPATCH_MAX_PARALLEL));
+      const batchResults = await Promise.all(
+        batch.map(({ action }) => executeDispatchAction(action)),
+      );
+      batch.forEach((item, idx) => {
+        results[item.index] = batchResults[idx];
+      });
+      cursor += Math.max(1, DISPATCH_MAX_PARALLEL);
+    }
+  }
+
+  return results;
+}
+
+async function executeDispatchAction(
+  action: DispatchRequest['actions'][number],
+): Promise<ExecutionResult> {
+  if (action.type === 'ssh') {
+    return executeSSHAction(
+      action as Extract<Action, { type: 'ssh' }>,
+      Date.now(),
+      new Date().toISOString(),
+    );
+  }
+  if (action.type === 'web_fetch') {
+    return executeWebFetchAction(
+      action as DispatchWebFetchAction,
+      Date.now(),
+      new Date().toISOString(),
+    );
+  }
+  if (action.type === 'image_to_text') {
+    return executeImageToTextAction(
+      action as DispatchImageToTextAction,
+      Date.now(),
+      new Date().toISOString(),
+    );
+  }
+  if (action.type === 'voice_to_text') {
+    return executeVoiceToTextAction(
+      action as DispatchVoiceToTextAction,
+      Date.now(),
+      new Date().toISOString(),
+    );
+  }
+  if (action.type === 'opencode_serve') {
+    return executeOpencodeServeAction(
+      action as DispatchOpencodeServeAction,
+      Date.now(),
+      new Date().toISOString(),
+    );
+  }
+  return {
+    actionId: action.id || 'unknown',
+    stdout: '',
+    stderr: `Unsupported action type: ${action.type}`,
+    exitCode: 1,
+    executedAt: new Date().toISOString(),
+    durationMs: 0,
+  };
 }
 
 // ============================================================================
@@ -280,6 +423,32 @@ interface DispatchWebFetchAction {
   mode?: 'http' | 'browser';
   extract?: string;
   timeout?: number;
+}
+
+interface DispatchImageToTextAction {
+  id?: string;
+  type: 'image_to_text';
+  imageUrl?: string;
+  prompt?: string;
+  timeout?: number;
+}
+
+interface DispatchVoiceToTextAction {
+  id?: string;
+  type: 'voice_to_text';
+  audioUrl?: string;
+  language?: string;
+  timeout?: number;
+}
+
+interface DispatchOpencodeServeAction {
+  id?: string;
+  type: 'opencode_serve';
+  task?: string;
+  cwd?: string;
+  timeout?: number;
+  executionMode?: 'foreground' | 'background';
+  parallelGroup?: string;
 }
 
 const WEB_FETCH_ALLOWLIST = (process.env.WEB_FETCH_ALLOWLIST || '')
@@ -574,6 +743,248 @@ async function executeBrowserFetch(url: string, timeoutMs: number): Promise<stri
     const text = (await resp.text()).slice(0, 12000);
     return [`url=${url}`, `mode=browser-fallback`, '', text].join('\n');
   }
+}
+
+async function executeJsonRunnerCall(
+  runnerName: string,
+  endpoint: string,
+  token: string,
+  payload: Record<string, unknown>,
+  timeoutMs: number,
+  signal?: AbortSignal,
+): Promise<{ ok: boolean; output: string }> {
+  if (!endpoint) {
+    return {
+      ok: false,
+      output: `${runnerName} is not configured on this instance.`,
+    };
+  }
+
+  try {
+    const headers: Record<string, string> = {
+      'content-type': 'application/json',
+    };
+    if (token) headers.authorization = `Bearer ${token}`;
+
+    const resp = await fetch(endpoint, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify(payload),
+      signal: signal || AbortSignal.timeout(timeoutMs),
+    });
+    const text = (await resp.text()).slice(0, 12000);
+    return {
+      ok: resp.ok,
+      output: text || `HTTP ${resp.status}`,
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      output: error instanceof Error ? error.message : 'Runner call failed',
+    };
+  }
+}
+
+async function executeImageToTextAction(
+  action: DispatchImageToTextAction,
+  startTime: number,
+  executedAt: string,
+): Promise<ExecutionResult> {
+  const imageUrl = (action.imageUrl || '').trim();
+  if (!imageUrl) {
+    return {
+      actionId: action.id || 'unknown',
+      stdout: '',
+      stderr: 'image_to_text action missing imageUrl',
+      exitCode: 1,
+      executedAt,
+      durationMs: Date.now() - startTime,
+    };
+  }
+  if (!isAllowedWebUrl(imageUrl)) {
+    return {
+      actionId: action.id || 'unknown',
+      stdout: '',
+      stderr: 'Image URL blocked by safety policy',
+      exitCode: 1,
+      executedAt,
+      durationMs: Date.now() - startTime,
+    };
+  }
+
+  const timeoutMs = (action.timeout || DEFAULT_TIMEOUT) * 1000;
+  const result = await executeJsonRunnerCall(
+    'image_to_text runner',
+    IMAGE_TO_TEXT_URL,
+    IMAGE_TO_TEXT_TOKEN,
+    {
+      imageUrl,
+      prompt: action.prompt || 'Describe this image in detail.',
+    },
+    timeoutMs,
+  );
+
+  return {
+    actionId: action.id || 'unknown',
+    stdout: result.ok ? result.output : '',
+    stderr: result.ok ? '' : result.output,
+    exitCode: result.ok ? 0 : 1,
+    executedAt,
+    durationMs: Date.now() - startTime,
+  };
+}
+
+async function executeVoiceToTextAction(
+  action: DispatchVoiceToTextAction,
+  startTime: number,
+  executedAt: string,
+): Promise<ExecutionResult> {
+  const audioUrl = (action.audioUrl || '').trim();
+  if (!audioUrl) {
+    return {
+      actionId: action.id || 'unknown',
+      stdout: '',
+      stderr: 'voice_to_text action missing audioUrl',
+      exitCode: 1,
+      executedAt,
+      durationMs: Date.now() - startTime,
+    };
+  }
+  if (!isAllowedWebUrl(audioUrl)) {
+    return {
+      actionId: action.id || 'unknown',
+      stdout: '',
+      stderr: 'Audio URL blocked by safety policy',
+      exitCode: 1,
+      executedAt,
+      durationMs: Date.now() - startTime,
+    };
+  }
+
+  const timeoutMs = (action.timeout || DEFAULT_TIMEOUT) * 1000;
+  const result = await executeJsonRunnerCall(
+    'voice_to_text runner',
+    VOICE_TO_TEXT_URL,
+    VOICE_TO_TEXT_TOKEN,
+    {
+      audioUrl,
+      language: action.language || 'auto',
+    },
+    timeoutMs,
+  );
+
+  return {
+    actionId: action.id || 'unknown',
+    stdout: result.ok ? result.output : '',
+    stderr: result.ok ? '' : result.output,
+    exitCode: result.ok ? 0 : 1,
+    executedAt,
+    durationMs: Date.now() - startTime,
+  };
+}
+
+async function executeOpencodeServeAction(
+  action: DispatchOpencodeServeAction,
+  startTime: number,
+  executedAt: string,
+): Promise<ExecutionResult> {
+  const task = (action.task || '').trim();
+  if (!task) {
+    return {
+      actionId: action.id || 'unknown',
+      stdout: '',
+      stderr: 'opencode_serve action missing task',
+      exitCode: 1,
+      executedAt,
+      durationMs: Date.now() - startTime,
+    };
+  }
+
+  const timeoutMs = (action.timeout || DEFAULT_TIMEOUT) * 1000;
+  const payload = {
+    task,
+    cwd: action.cwd || '/home/adam/nanoclaw',
+    executionMode: action.executionMode || 'foreground',
+  };
+
+  if (action.executionMode === 'background') {
+    if (!OPENCODE_SERVE_URL) {
+      return {
+        actionId: action.id || 'unknown',
+        stdout: '',
+        stderr: 'opencode_serve runner is not configured on this instance.',
+        exitCode: 1,
+        executedAt,
+        durationMs: Date.now() - startTime,
+      };
+    }
+    const runId = `run-${randomUUID()}`;
+    const createdAt = new Date().toISOString();
+    db.createRun({
+      id: runId,
+      actionType: 'opencode_serve',
+      status: 'queued',
+      createdAt,
+      summary: task.slice(0, 240),
+    });
+
+    const controller = new AbortController();
+    backgroundRunAbortControllers.set(runId, controller);
+    void (async () => {
+      db.updateRun(runId, {
+        status: 'running',
+        startedAt: new Date().toISOString(),
+      });
+      const res = await executeJsonRunnerCall(
+        'opencode_serve runner',
+        OPENCODE_SERVE_URL,
+        OPENCODE_SERVE_TOKEN,
+        payload,
+        timeoutMs,
+        controller.signal,
+      );
+      if (controller.signal.aborted) {
+        db.updateRun(runId, {
+          status: 'cancelled',
+          completedAt: new Date().toISOString(),
+          errorText: 'Cancelled by operator request.',
+        });
+        backgroundRunAbortControllers.delete(runId);
+        return;
+      }
+      db.updateRun(runId, {
+        status: res.ok ? 'completed' : 'failed',
+        completedAt: new Date().toISOString(),
+        ...(res.ok ? { resultText: res.output } : { errorText: res.output }),
+      });
+      backgroundRunAbortControllers.delete(runId);
+    })();
+    return {
+      actionId: action.id || 'unknown',
+      stdout: `Background subagent started.\nrunId=${runId}\nUse /run ${runId} for status.`,
+      stderr: '',
+      exitCode: 0,
+      executedAt,
+      durationMs: Date.now() - startTime,
+    };
+  }
+
+  const result = await executeJsonRunnerCall(
+    'opencode_serve runner',
+    OPENCODE_SERVE_URL,
+    OPENCODE_SERVE_TOKEN,
+    payload,
+    timeoutMs,
+  );
+
+  return {
+    actionId: action.id || 'unknown',
+    stdout: result.ok ? result.output : '',
+    stderr: result.ok ? '' : result.output,
+    exitCode: result.ok ? 0 : 1,
+    executedAt,
+    durationMs: Date.now() - startTime,
+  };
 }
 
 async function executeObsidianAction(

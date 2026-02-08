@@ -8,6 +8,10 @@ import {
   ENABLE_LOCAL_APPROVED_EXECUTION,
 } from './config.js';
 import type { Action } from './plan-contract.js';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
+import fs from 'node:fs';
+import path from 'node:path';
 
 const BLOCKED_META_CHARS = /[;&|`$<>{}\\]/;
 
@@ -49,7 +53,25 @@ interface DispatchPayload {
   dispatchId: string;
   dispatchedAt: string;
   source: 'nanoclaw-core';
-  actions: Array<Extract<Action, { type: 'ssh' | 'web_fetch' }>>;
+  actions: Array<
+    Extract<
+      Action,
+      { type: 'ssh' | 'web_fetch' | 'image_to_text' | 'voice_to_text' | 'opencode_serve' }
+    >
+  >;
+}
+
+const execFileAsync = promisify(execFile);
+const REPO_ROOT = process.cwd();
+
+function formatExecFileError(err: unknown): string {
+  if (!(err instanceof Error)) return String(err);
+  const anyErr = err as Error & { stderr?: string; stdout?: string; code?: number | string };
+  const parts = [err.message];
+  if (typeof anyErr.code !== 'undefined') parts.push(`code=${String(anyErr.code)}`);
+  if (anyErr.stderr && anyErr.stderr.trim()) parts.push(`stderr: ${anyErr.stderr.trim()}`);
+  if (anyErr.stdout && anyErr.stdout.trim()) parts.push(`stdout: ${anyErr.stdout.trim()}`);
+  return parts.join('\n');
 }
 
 function buildWebhookSignature(timestamp: string, payload: string, secret: string): string {
@@ -110,7 +132,12 @@ export function isAllowedWebUrl(url: string): boolean {
 }
 
 async function dispatchApprovedActions(
-  actions: Array<Extract<Action, { type: 'ssh' | 'web_fetch' }>>,
+  actions: Array<
+    Extract<
+      Action,
+      { type: 'ssh' | 'web_fetch' | 'image_to_text' | 'voice_to_text' | 'opencode_serve' }
+    >
+  >,
 ): Promise<{
   ok: boolean;
   output: string;
@@ -204,6 +231,12 @@ export async function executeApprovedActions(actions: Action[]): Promise<Executi
           ? action.command
           : action.type === 'web_fetch'
             ? action.url
+            : action.type === 'image_to_text'
+              ? action.imageUrl
+              : action.type === 'voice_to_text'
+                ? action.audioUrl
+                : action.type === 'opencode_serve'
+                  ? action.task
             : undefined,
       status: 'blocked',
       output: 'Local execution is disabled in core app; route through webhook dispatcher.',
@@ -211,10 +244,188 @@ export async function executeApprovedActions(actions: Action[]): Promise<Executi
   }
 
   const results: ExecutionResult[] = [];
-  const dispatchableActions: Array<Extract<Action, { type: 'ssh' | 'web_fetch' }>> = [];
+  const dispatchableActions: Array<
+    Extract<
+      Action,
+      { type: 'ssh' | 'web_fetch' | 'image_to_text' | 'voice_to_text' | 'opencode_serve' }
+    >
+  > = [];
 
   for (const action of actions) {
-    if (action.type !== 'ssh' && action.type !== 'web_fetch') {
+    if (action.type === 'addon_install') {
+      if (!action.requiresApproval) {
+        results.push({
+          actionType: 'addon_install',
+          command: action.addon,
+          status: 'blocked',
+          output: 'addon_install requires explicit approval.',
+        });
+        continue;
+      }
+      if (!/^[a-z0-9][a-z0-9-]{0,63}$/i.test(action.addon)) {
+        results.push({
+          actionType: 'addon_install',
+          command: action.addon,
+          status: 'blocked',
+          output: 'Invalid addon identifier format.',
+        });
+        continue;
+      }
+      try {
+        const { stdout, stderr } = await execFileAsync('./scripts/gorky', ['addon-install', action.addon], {
+          timeout: 120000,
+          maxBuffer: 1024 * 1024,
+        });
+        const output = [stdout?.trim(), stderr?.trim()].filter(Boolean).join('\n');
+        results.push({
+          actionType: 'addon_install',
+          command: action.addon,
+          status: 'executed',
+          output: output || `Installed addon: ${action.addon}`,
+        });
+      } catch (err) {
+        const output =
+          err instanceof Error
+            ? err.message
+            : String(err);
+        results.push({
+          actionType: 'addon_install',
+          command: action.addon,
+          status: 'failed',
+          output: `Addon install failed: ${output}`,
+        });
+      }
+      continue;
+    }
+
+    if (action.type === 'addon_create') {
+      if (!action.requiresApproval) {
+        results.push({
+          actionType: 'addon_create',
+          command: action.addon,
+          status: 'blocked',
+          output: 'addon_create requires explicit approval.',
+        });
+        continue;
+      }
+      if (!/^[a-z0-9][a-z0-9-]{0,63}$/i.test(action.addon)) {
+        results.push({
+          actionType: 'addon_create',
+          command: action.addon,
+          status: 'blocked',
+          output: 'Invalid addon identifier format.',
+        });
+        continue;
+      }
+      if (!action.purpose || action.purpose.trim().length < 3) {
+        results.push({
+          actionType: 'addon_create',
+          command: action.addon,
+          status: 'blocked',
+          output: 'addon_create requires a non-empty purpose.',
+        });
+        continue;
+      }
+      const addonPath = path.join(REPO_ROOT, 'addons', action.addon);
+      if (fs.existsSync(addonPath)) {
+        results.push({
+          actionType: 'addon_create',
+          command: action.addon,
+          status: 'blocked',
+          output:
+            `Addon "${action.addon}" already exists at addons/${action.addon}. ` +
+            'Choose a new name, or delete/rename the existing addon first.',
+        });
+        continue;
+      }
+      try {
+        const { stdout, stderr } = await execFileAsync('./scripts/gorky', ['addon-create', action.addon, action.purpose], {
+          timeout: 120000,
+          maxBuffer: 1024 * 1024,
+        });
+        const output = [stdout?.trim(), stderr?.trim()].filter(Boolean).join('\n');
+        results.push({
+          actionType: 'addon_create',
+          command: action.addon,
+          status: 'executed',
+          output: output || `Created addon scaffold: ${action.addon}`,
+        });
+      } catch (err) {
+        const output = formatExecFileError(err);
+        results.push({
+          actionType: 'addon_create',
+          command: action.addon,
+          status: 'failed',
+          output: `Addon create failed: ${output}`,
+        });
+      }
+      continue;
+    }
+
+    if (action.type === 'addon_run') {
+      if (!action.requiresApproval) {
+        results.push({
+          actionType: 'addon_run',
+          command: action.addon,
+          status: 'blocked',
+          output: 'addon_run requires explicit approval.',
+        });
+        continue;
+      }
+      if (!/^[a-z0-9][a-z0-9-]{0,63}$/i.test(action.addon)) {
+        results.push({
+          actionType: 'addon_run',
+          command: action.addon,
+          status: 'blocked',
+          output: 'Invalid addon identifier format.',
+        });
+        continue;
+      }
+      const addonPath = path.join(REPO_ROOT, 'addons', action.addon);
+      if (!fs.existsSync(addonPath)) {
+        results.push({
+          actionType: 'addon_run',
+          command: action.addon,
+          status: 'blocked',
+          output: `Addon "${action.addon}" not found at addons/${action.addon}.`,
+        });
+        continue;
+      }
+      try {
+        const args = ['addon-run', action.addon];
+        if (action.input && action.input.trim().length > 0) {
+          args.push(action.input.trim());
+        }
+        const { stdout, stderr } = await execFileAsync('./scripts/gorky', args, {
+          timeout: 300000,
+          maxBuffer: 2 * 1024 * 1024,
+        });
+        const output = [stdout?.trim(), stderr?.trim()].filter(Boolean).join('\n');
+        results.push({
+          actionType: 'addon_run',
+          command: action.addon,
+          status: 'executed',
+          output: output || `Ran addon hook: ${action.addon}`,
+        });
+      } catch (err) {
+        const output = formatExecFileError(err);
+        results.push({
+          actionType: 'addon_run',
+          command: action.addon,
+          status: 'failed',
+          output: `Addon run failed: ${output}`,
+        });
+      }
+      continue;
+    }
+
+    if (
+      action.type !== 'ssh' &&
+      action.type !== 'web_fetch' &&
+      action.type !== 'image_to_text' &&
+      action.type !== 'voice_to_text' &&
+      action.type !== 'opencode_serve'
+    ) {
       results.push({
         actionType: action.type,
         status: 'skipped',
@@ -254,6 +465,37 @@ export async function executeApprovedActions(actions: Action[]): Promise<Executi
       }
     }
 
+    if (action.type === 'image_to_text') {
+      if (!isAllowedWebUrl(action.imageUrl)) {
+        results.push({
+          actionType: 'image_to_text',
+          status: 'blocked',
+          output: 'Image URL blocked by web safety policy.',
+        });
+        continue;
+      }
+    }
+
+    if (action.type === 'voice_to_text') {
+      if (!isAllowedWebUrl(action.audioUrl)) {
+        results.push({
+          actionType: 'voice_to_text',
+          status: 'blocked',
+          output: 'Audio URL blocked by web safety policy.',
+        });
+        continue;
+      }
+    }
+
+    if (action.type === 'opencode_serve' && !action.requiresApproval) {
+      results.push({
+        actionType: 'opencode_serve',
+        status: 'blocked',
+        output: 'opencode_serve requires explicit approval.',
+      });
+      continue;
+    }
+
     dispatchableActions.push(action);
   }
 
@@ -262,7 +504,18 @@ export async function executeApprovedActions(actions: Action[]): Promise<Executi
       results.push({
         actionType: action.type,
         target: action.type === 'ssh' ? action.target : undefined,
-        command: action.type === 'ssh' ? action.command : action.url,
+        command:
+          action.type === 'ssh'
+            ? action.command
+            : action.type === 'web_fetch'
+              ? action.url
+              : action.type === 'image_to_text'
+                ? action.imageUrl
+                : action.type === 'voice_to_text'
+                  ? action.audioUrl
+                  : action.type === 'opencode_serve'
+                    ? action.task
+                    : undefined,
         status: 'skipped',
         output: 'Approved execution is disabled (ENABLE_APPROVED_EXECUTION=false).',
       });
@@ -279,7 +532,18 @@ export async function executeApprovedActions(actions: Action[]): Promise<Executi
       results.push({
         actionType: action.type,
         target: action.type === 'ssh' ? action.target : undefined,
-        command: action.type === 'ssh' ? action.command : action.url,
+        command:
+          action.type === 'ssh'
+            ? action.command
+            : action.type === 'web_fetch'
+              ? action.url
+              : action.type === 'image_to_text'
+                ? action.imageUrl
+                : action.type === 'voice_to_text'
+                  ? action.audioUrl
+                  : action.type === 'opencode_serve'
+                    ? action.task
+                    : undefined,
         status: 'skipped',
         output:
           'No APPROVED_ACTION_WEBHOOK_URL configured. Action stayed queued/orchestrated only.',
@@ -306,7 +570,18 @@ export async function executeApprovedActions(actions: Action[]): Promise<Executi
     results.push({
       actionType: action.type,
       target: action.type === 'ssh' ? action.target : undefined,
-      command: action.type === 'ssh' ? action.command : action.url,
+      command:
+        action.type === 'ssh'
+          ? action.command
+          : action.type === 'web_fetch'
+            ? action.url
+            : action.type === 'image_to_text'
+              ? action.imageUrl
+              : action.type === 'voice_to_text'
+                ? action.audioUrl
+                : action.type === 'opencode_serve'
+                  ? action.task
+                  : undefined,
       status,
       output: runnerOut || dispatch.output,
     });

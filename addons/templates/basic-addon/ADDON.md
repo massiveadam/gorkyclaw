@@ -4,6 +4,8 @@
 
 `basic-addon`
 
+Manifest: `addon.json`
+
 ## Purpose
 
 Describe the capability this addon introduces.

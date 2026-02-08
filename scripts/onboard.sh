@@ -186,6 +186,13 @@ set_env "COMPLETION_MODEL" "google/gemma-3-27b-it:free"
 set_env "FALLBACK_MODELS" "meta-llama/llama-3.3-70b-instruct:free,mistralai/mistral-small-3.1-24b-instruct:free"
 set_env "ENABLE_APPROVED_EXECUTION" "true"
 set_env "APPROVED_ACTION_WEBHOOK_URL" "http://127.0.0.1:8080/dispatch"
+set_env "OPS_RUNNER_URL" "http://127.0.0.1:8080"
+set_env "RUN_MONITOR_POLL_INTERVAL_MS" "15000"
+set_env "OPENCODE_SERVE_URL" "http://host.docker.internal:8765/run"
+set_env "OPENCODE_LOCAL_PORT" "8765"
+set_env "OPENCODE_DEFAULT_WORKDIR" "$PWD"
+set_env "OPENCODE_TIMEOUT_MS" "21600000"
+set_env "OPENCODE_LOCAL_AUTOSTART" "true"
 
 if ! has_line '^OPS_RUNNER_SHARED_SECRET=.+$' || [[ "$(get_value "OPS_RUNNER_SHARED_SECRET")" == "CHANGE_ME_RUNNER_SECRET" ]]; then
   set_env "OPS_RUNNER_SHARED_SECRET" "$(gen_secret)"
@@ -204,7 +211,7 @@ if [[ "$start_now" =~ ^[Yy]$ ]]; then
   ./scripts/bootstrap.sh
   docker rm -f openclaw-anthropic-proxy openclaw-runner 2>/dev/null || true
   docker run -d --name openclaw-anthropic-proxy --restart unless-stopped --env-file .env -e PORT=3000 -p 3000:3000 openclaw-anthropic-proxy:latest
-  docker run -d --name openclaw-runner --restart unless-stopped --env-file .env -e PORT=8080 -p 8080:8080 -v "$HOME/.ssh:/app/keys:ro" -v "$PWD/infra/data:/app/data" nanoclaw-ops-runner:latest
+  docker run -d --name openclaw-runner --restart unless-stopped --env-file .env -e PORT=8080 -p 8080:8080 --add-host host.docker.internal:host-gateway -v "$HOME/.ssh:/app/keys:ro" -v "$PWD/infra/data:/app/data" nanoclaw-ops-runner:latest
   sudo systemctl restart nanoclaw
   ./scripts/doctor.sh || true
 fi

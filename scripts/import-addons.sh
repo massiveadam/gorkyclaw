@@ -6,7 +6,7 @@ cd "$ROOT_DIR"
 
 BUNDLE="${1:-}"
 if [[ -z "$BUNDLE" ]]; then
-  echo "Usage: $0 <skills-export.tgz>"
+  echo "Usage: $0 <addons-export.tgz>"
   exit 1
 fi
 
@@ -15,6 +15,6 @@ if [[ ! -f "$BUNDLE" ]]; then
   exit 1
 fi
 
-mkdir -p skills
+mkdir -p addons
 tar -xzf "$BUNDLE" -C "$ROOT_DIR"
-echo "Imported skills from: $BUNDLE"
+echo "Imported addons from: $BUNDLE"

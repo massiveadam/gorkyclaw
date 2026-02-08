@@ -117,12 +117,12 @@ nanoclaw/
 │   │       ├── index.ts           # Entry point (reads JSON, runs agent)
 │   │       └── ipc-mcp.ts         # MCP server for host communication
 │   └── skills/
-│       └── agent-browser.md       # Browser automation skill
+│       └── agent-browser.md       # Legacy internal browser addon prompt
 │
 ├── dist/                          # Compiled JavaScript (gitignored)
 │
 ├── .claude/
-│   └── skills/
+│   └── skills/                    # Internal Claude tooling skills (not user extension API)
 │       ├── setup/
 │       │   └── SKILL.md           # /setup skill
 │       ├── customize/

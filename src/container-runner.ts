@@ -219,7 +219,7 @@ function buildContainerArgs(
 export async function runContainerAgent(
   group: RegisteredGroup,
   input: ContainerInput,
-  onProcess: (proc: ChildProcess, containerName: string) => void,
+  onProcess?: (proc: ChildProcess, containerName: string) => void,
 ): Promise<ContainerOutput> {
   const startTime = Date.now();
 
@@ -271,7 +271,7 @@ export async function runContainerAgent(
       env: containerEnv,
     });
 
-    onProcess(container, containerName);
+  onProcess?.(container, containerName);
 
     let stdout = '';
     let stderr = '';

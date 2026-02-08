@@ -80,6 +80,108 @@ test('parsePlanFromText validates web_fetch actions', () => {
   });
 });
 
+test('parsePlanFromText validates extended runner actions', () => {
+  const raw = [
+    '```json',
+    JSON.stringify(
+      {
+        actions: [
+          {
+            type: 'image_to_text',
+            imageUrl: 'https://example.com/image.jpg',
+            requiresApproval: true,
+            reason: 'Extract text from screenshot',
+            prompt: 'Read visible text only',
+            parallelGroup: 'media',
+          },
+          {
+            type: 'voice_to_text',
+            audioUrl: 'https://example.com/audio.mp3',
+            requiresApproval: true,
+            reason: 'Transcribe voice note',
+            language: 'en',
+            parallelGroup: 'media',
+          },
+          {
+            type: 'opencode_serve',
+            task: 'Run lint and summarize failures',
+            requiresApproval: true,
+            reason: 'Code maintenance task',
+            cwd: '/home/adam/nanoclaw',
+            timeout: 120,
+            executionMode: 'background',
+          },
+          {
+            type: 'addon_install',
+            addon: 'image-to-text',
+            requiresApproval: true,
+            reason: 'Enable OCR capability',
+          },
+          {
+            type: 'addon_create',
+            addon: 'album-flac-processor',
+            purpose: 'Download FLAC albums and import with beets',
+            requiresApproval: true,
+            reason: 'Scaffold new addon requested by user',
+          },
+          {
+            type: 'addon_run',
+            addon: 'squid-music-downloader',
+            input: 'album=kind of blue',
+            requiresApproval: true,
+            reason: 'Run downloader addon for requested album',
+          },
+        ],
+      },
+      null,
+      2,
+    ),
+    '```',
+  ].join('\n');
+
+  const result = parsePlanFromText(raw);
+  assert.ok(result.plan);
+  assert.strictEqual(result.errors.length, 0);
+  assert.strictEqual(result.plan?.actions.length, 6);
+  assert.deepStrictEqual(result.plan?.actions[0], {
+    type: 'image_to_text',
+    imageUrl: 'https://example.com/image.jpg',
+    requiresApproval: true,
+    reason: 'Extract text from screenshot',
+    prompt: 'Read visible text only',
+    parallelGroup: 'media',
+  });
+  assert.deepStrictEqual(result.plan?.actions[2], {
+    type: 'opencode_serve',
+    task: 'Run lint and summarize failures',
+    requiresApproval: true,
+    reason: 'Code maintenance task',
+    cwd: '/home/adam/nanoclaw',
+    timeout: 120,
+    executionMode: 'background',
+  });
+  assert.deepStrictEqual(result.plan?.actions[3], {
+    type: 'addon_install',
+    addon: 'image-to-text',
+    requiresApproval: true,
+    reason: 'Enable OCR capability',
+  });
+  assert.deepStrictEqual(result.plan?.actions[4], {
+    type: 'addon_create',
+    addon: 'album-flac-processor',
+    purpose: 'Download FLAC albums and import with beets',
+    requiresApproval: true,
+    reason: 'Scaffold new addon requested by user',
+  });
+  assert.deepStrictEqual(result.plan?.actions[5], {
+    type: 'addon_run',
+    addon: 'squid-music-downloader',
+    input: 'album=kind of blue',
+    requiresApproval: true,
+    reason: 'Run downloader addon for requested album',
+  });
+});
+
 test('parsePlanFromText reports missing block', () => {
   const result = parsePlanFromText('No block here');
   assert.strictEqual(result.plan, null);

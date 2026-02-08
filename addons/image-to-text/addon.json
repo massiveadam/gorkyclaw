@@ -1,0 +1,22 @@
+{
+  "schemaVersion": 1,
+  "name": "image-to-text",
+  "title": "Image To Text",
+  "description": "Adds OCR capability so Gorky can extract text from screenshots or photos after approval.",
+  "type": "capability",
+  "version": "1.0.0",
+  "requiresApprovalByDefault": true,
+  "capabilities": [
+    "image_to_text"
+  ],
+  "entrypoints": {
+    "install": "install.sh",
+    "docs": "ADDON.md",
+    "envExample": "env.example"
+  },
+  "env": [
+    { "key": "OCR_PROVIDER", "required": false },
+    { "key": "OCR_MAX_IMAGE_MB", "required": false },
+    { "key": "OCR_API_KEY", "required": false }
+  ]
+}

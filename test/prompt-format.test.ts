@@ -33,7 +33,11 @@ test('buildAgentGroundingHeader includes local runtime identity and addon guidan
   const header = buildAgentGroundingHeader();
   assert.match(header, /You are Gorky/);
   assert.match(header, /Interface: Telegram bot/);
-  assert.match(header, /skills are under `skills\/`/);
-  assert.match(header, /addons are under `addons\/`/);
+  assert.match(header, /capabilities are packaged as addons under `addons\/`/);
   assert.match(header, /gorky addon-install <name>/);
+  assert.match(header, /gorky export-addons <file>/);
+  assert.match(header, /gorky import-addons <file>/);
+  assert.match(header, /Do not instruct users to create or install `skills\/`/);
+  assert.match(header, /parallelGroup/);
+  assert.match(header, /executionMode/);
 });

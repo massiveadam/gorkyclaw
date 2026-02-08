@@ -36,18 +36,18 @@ I don't need an installation wizard - Claude Code guides the setup. I don't need
 
 The codebase assumes you have an AI collaborator. It doesn't need to be excessively self-documenting or self-debugging because Claude is always there.
 
-### Skills Over Features
+### Addons Over Features
 
-When people contribute, they shouldn't add "Telegram support alongside WhatsApp." They should contribute a skill like `/add-telegram` that transforms the codebase. Users fork the repo, run skills to customize, and end up with clean code that does exactly what they need - not a bloated system trying to support everyone's use case simultaneously.
+When people contribute, they shouldn't add "Telegram support alongside WhatsApp." They should contribute an addon like `add-telegram` that transforms the codebase. Users fork the repo, install addons to customize, and end up with clean code that does exactly what they need, not a bloated system trying to support everyone's use case simultaneously.
 
 ---
 
-## RFS (Request for Skills)
+## RFS (Request for Addons)
 
-Skills we'd love contributors to build:
+Addons we'd love contributors to build:
 
 ### Communication Channels
-Skills to add or switch to different messaging platforms:
+Addons to add or switch to different messaging platforms:
 - `/add-telegram` - Add Telegram as an input channel
 - `/add-slack` - Add Slack as an input channel
 - `/add-discord` - Add Discord as an input channel

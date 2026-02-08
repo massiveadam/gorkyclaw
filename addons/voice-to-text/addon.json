@@ -1,0 +1,23 @@
+{
+  "schemaVersion": 1,
+  "name": "voice-to-text",
+  "title": "Voice To Text",
+  "description": "Adds speech transcription so Gorky can process voice notes into text commands.",
+  "type": "capability",
+  "version": "1.0.0",
+  "requiresApprovalByDefault": true,
+  "capabilities": [
+    "voice_to_text"
+  ],
+  "entrypoints": {
+    "install": "install.sh",
+    "docs": "ADDON.md",
+    "envExample": "env.example"
+  },
+  "env": [
+    { "key": "STT_PROVIDER", "required": false },
+    { "key": "STT_DEFAULT_LANGUAGE", "required": false },
+    { "key": "STT_MAX_AUDIO_MINUTES", "required": false },
+    { "key": "STT_API_KEY", "required": false }
+  ]
+}
