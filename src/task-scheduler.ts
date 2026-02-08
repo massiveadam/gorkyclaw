@@ -1,9 +1,10 @@
+import { ChildProcess } from 'child_process';
 import { CronExpressionParser } from 'cron-parser';
 import fs from 'fs';
 import path from 'path';
 
 import {
-  DATA_DIR,
+  ASSISTANT_NAME,
   GROUPS_DIR,
   MAIN_GROUP_FOLDER,
   SCHEDULER_POLL_INTERVAL,
@@ -17,6 +18,7 @@ import {
   logTaskRun,
   updateTaskAfterRun,
 } from './db.js';
+import { GroupQueue } from './group-queue.js';
 import { logger } from './logger.js';
 import { RegisteredGroup, ScheduledTask } from './types.js';
 
@@ -24,6 +26,8 @@ export interface SchedulerDependencies {
   sendMessage: (jid: string, text: string) => Promise<void>;
   registeredGroups: () => Record<string, RegisteredGroup>;
   getSessions: () => Record<string, string>;
+  queue: GroupQueue;
+  onProcess: (groupJid: string, proc: ChildProcess, containerName: string) => void;
 }
 
 async function runTask(
@@ -86,19 +90,25 @@ async function runTask(
     task.context_mode === 'group' ? sessions[task.group_folder] : undefined;
 
   try {
-    const output = await runContainerAgent(group, {
-      prompt: task.prompt,
-      sessionId,
-      groupFolder: task.group_folder,
-      chatJid: task.chat_jid,
-      isMain,
-      isScheduledTask: true,
-    });
+    const output = await runContainerAgent(
+      group,
+      {
+        prompt: task.prompt,
+        sessionId,
+        groupFolder: task.group_folder,
+        chatJid: task.chat_jid,
+        isMain,
+      },
+      (proc, containerName) => deps.onProcess(task.chat_jid, proc, containerName),
+    );
 
     if (output.status === 'error') {
       error = output.error || 'Unknown error';
-    } else {
-      result = output.result;
+    } else if (output.result) {
+      if (output.result.outputType === 'message' && output.result.userMessage) {
+        await deps.sendMessage(task.chat_jid, `${ASSISTANT_NAME}: ${output.result.userMessage}`);
+      }
+      result = output.result.userMessage || output.result.internalLog || null;
     }
 
     logger.info(
@@ -165,7 +175,11 @@ export function startSchedulerLoop(deps: SchedulerDependencies): void {
           continue;
         }
 
-        await runTask(currentTask, deps);
+        deps.queue.enqueueTask(
+          currentTask.chat_jid,
+          currentTask.id,
+          () => runTask(currentTask, deps),
+        );
       }
     } catch (err) {
       logger.error({ err }, 'Error in scheduler loop');

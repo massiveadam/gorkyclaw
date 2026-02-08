@@ -2,7 +2,7 @@
  * Container Runner for NanoClaw
  * Spawns agent execution in Docker container and handles IPC
  */
-import { exec, spawn } from 'child_process';
+import { ChildProcess, exec, spawn } from 'child_process';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
@@ -39,12 +39,17 @@ export interface ContainerInput {
   groupFolder: string;
   chatJid: string;
   isMain: boolean;
-  isScheduledTask?: boolean;
+}
+
+export interface AgentResponse {
+  outputType: 'message' | 'log';
+  userMessage?: string;
+  internalLog?: string;
 }
 
 export interface ContainerOutput {
   status: 'success' | 'error';
-  result: string | null;
+  result: AgentResponse | null;
   newSessionId?: string;
   error?: string;
 }
@@ -52,7 +57,7 @@ export interface ContainerOutput {
 interface VolumeMount {
   hostPath: string;
   containerPath: string;
-  readonly?: boolean;
+  readonly: boolean;
 }
 
 interface ContainerConfig {
@@ -214,6 +219,7 @@ function buildContainerArgs(
 export async function runContainerAgent(
   group: RegisteredGroup,
   input: ContainerInput,
+  onProcess: (proc: ChildProcess, containerName: string) => void,
 ): Promise<ContainerOutput> {
   const startTime = Date.now();
 
@@ -264,6 +270,8 @@ export async function runContainerAgent(
       stdio: ['pipe', 'pipe', 'pipe'],
       env: containerEnv,
     });
+
+    onProcess(container, containerName);
 
     let stdout = '';
     let stderr = '';
@@ -378,7 +386,9 @@ export async function runContainerAgent(
         ``,
       ];
 
-      if (isVerbose) {
+      const isError = code !== 0;
+
+      if (isVerbose || isError) {
         logLines.push(
           `=== Input ===`,
           JSON.stringify(input, null, 2),
@@ -414,14 +424,6 @@ export async function runContainerAgent(
             .join('\n'),
           ``,
         );
-
-        if (code !== 0) {
-          logLines.push(
-            `=== Stderr (last 500 chars) ===`,
-            stderr.slice(-500),
-            ``,
-          );
-        }
       }
 
       fs.writeFileSync(logFile, logLines.join('\n'));
@@ -433,7 +435,8 @@ export async function runContainerAgent(
             group: group.name,
             code,
             duration,
-            stderr: stderr.slice(-500),
+            stderr,
+            stdout,
             logFile,
           },
           'Container exited with error',
@@ -480,7 +483,8 @@ export async function runContainerAgent(
         logger.error(
           {
             group: group.name,
-            stdout: stdout.slice(-500),
+            stdout,
+            stderr,
             error: err,
           },
           'Failed to parse container output',

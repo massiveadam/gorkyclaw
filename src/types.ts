@@ -30,7 +30,6 @@ export interface AllowedRoot {
 export interface ContainerConfig {
   additionalMounts?: AdditionalMount[];
   timeout?: number; // Default: 300000 (5 minutes)
-  env?: Record<string, string>;
 }
 
 export interface RegisteredGroup {
@@ -39,10 +38,7 @@ export interface RegisteredGroup {
   trigger: string;
   added_at: string;
   containerConfig?: ContainerConfig;
-}
-
-export interface Session {
-  [folder: string]: string;
+  requiresTrigger?: boolean; // Default: true for groups, false for solo chats
 }
 
 export interface NewMessage {
