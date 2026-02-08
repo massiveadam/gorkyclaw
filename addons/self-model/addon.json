@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "name": "self-model",
+  "title": "Self Model",
+  "description": "Adds a local self-description source so setup and capability answers are grounded in this instance.",
+  "type": "knowledge",
+  "version": "1.0.0",
+  "requiresApprovalByDefault": true,
+  "capabilities": [
+    "self_introspection"
+  ],
+  "entrypoints": {
+    "install": "install.sh",
+    "docs": "ADDON.md",
+    "envExample": "env.example"
+  },
+  "env": [
+    { "key": "SELF_MODEL_ENABLED", "required": false },
+    { "key": "SELF_MODEL_REPORT_PATH", "required": false }
+  ]
+}

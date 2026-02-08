@@ -50,6 +50,8 @@ export interface NewMessage {
   timestamp: string;
 }
 
+export type Session = Record<string, string>;
+
 export interface ScheduledTask {
   id: string;
   group_folder: string;

@@ -20,7 +20,7 @@ Core direction in this fork:
 - replace WhatsApp-centric flow with Telegram as the primary interface
 - keep runtime minimal and auditable
 - keep secrets local (`.env`) and out of git
-- support sharing features between friends via `addons/` and `skills/`
+- support sharing features between friends via `addons/`
 
 ## Quick Start
 
@@ -51,6 +51,9 @@ gorky restart        # restart everything
 gorky logs           # tail service logs
 gorky onboard        # rerun onboarding
 gorky self           # regenerate runtime self-report
+gorky opencode-start # start local OpenCode runner endpoint
+gorky opencode-status
+gorky opencode-stop
 ```
 
 If `gorky` is not found:
@@ -84,12 +87,7 @@ Important `.env` values:
 - `REASONING_MODEL=google/gemma-3-27b-it:free`
 - `COMPLETION_MODEL=google/gemma-3-27b-it:free`
 
-## Addons and Skills
-
-This fork supports two extension layers:
-
-- `addons/` - installable feature packs with env templates/install hooks
-- `skills/` - reusable skill content and templates
+## Addons
 
 Commands:
 
@@ -99,9 +97,27 @@ gorky addon-install self-model
 gorky addon-install image-to-text
 gorky addon-install voice-to-text
 gorky addon-install opencode-serve
+gorky export-addons my-addons.tgz
+gorky import-addons my-addons.tgz
 ```
 
-Share features by committing addon/skill folders to git. Each user applies their own local `.env` values.
+Share features by committing addon folders to git. Each user applies their own local `.env` values.
+
+## Long-Run Agentic Coding
+
+- Background coding runs are tracked with persistent run IDs.
+- Telegram commands:
+  - `/runs` list recent background runs
+  - `/run <id>` inspect one run
+  - `/cancel <id>` request cancellation
+- Gorky now sends automatic Telegram updates when tracked runs move to `running` or terminal states.
+
+For VM-local OpenCode execution, configure:
+
+- `OPENCODE_SERVE_URL=http://host.docker.internal:8765/run`
+- `OPENCODE_SERVE_TOKEN=<token>`
+- `OPENCODE_TASK_COMMAND_TEMPLATE` for your local OpenCode CLI invocation
+- `OPENCODE_LOCAL_AUTOSTART=true` to start local runner automatically with `gorky start/restart`
 
 ## Security Model
 

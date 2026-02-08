@@ -1,0 +1,23 @@
+{
+  "schemaVersion": 1,
+  "name": "opencode-serve",
+  "title": "OpenCode Serve",
+  "description": "Connects Gorky to an OpenCode serve endpoint for long-running code tasks while preserving approvals.",
+  "type": "integration",
+  "version": "1.0.0",
+  "requiresApprovalByDefault": true,
+  "capabilities": [
+    "opencode_serve"
+  ],
+  "entrypoints": {
+    "install": "install.sh",
+    "docs": "ADDON.md",
+    "envExample": "env.example"
+  },
+  "env": [
+    { "key": "OPENCODE_SERVE_URL", "required": false },
+    { "key": "OPENCODE_SERVE_TOKEN", "required": false },
+    { "key": "OPENCODE_DEFAULT_WORKDIR", "required": false },
+    { "key": "OPENCODE_TIMEOUT_MS", "required": false }
+  ]
+}

@@ -45,7 +45,6 @@ branch="$(git branch --show-current 2>/dev/null || echo unknown)"
 commit="$(git rev-parse --short HEAD 2>/dev/null || echo unknown)"
 
 addons_list="$(find addons -mindepth 1 -maxdepth 1 -type d ! -name templates -printf '- %f\n' | sort || true)"
-skills_list="$(find skills -mindepth 1 -maxdepth 1 -type d -printf '- %f\n' | sort || true)"
 
 cat > "$REPORT_PATH" <<EOF
 # Gorky Self Model Snapshot
@@ -78,9 +77,6 @@ Generated: $(date -u +"%Y-%m-%dT%H:%M:%SZ")
 ### Addons (install with \`gorky addon-install <name>\`)
 ${addons_list:-"- (none)"}
 
-### Skills
-${skills_list:-"- (none)"}
-
 ## Operations Commands
 
 - Start stack: \`gorky\`
@@ -88,6 +84,10 @@ ${skills_list:-"- (none)"}
 - Rebuild report: \`gorky self\`
 - List addons: \`gorky addons\`
 - Install addon: \`gorky addon-install <name>\`
+- Export addons: \`gorky export-addons <file>\`
+- Import addons: \`gorky import-addons <file>\`
+- Start local OpenCode runner: \`gorky opencode-start\`
+- Local OpenCode status: \`gorky opencode-status\`
 
 ## Constraints
 

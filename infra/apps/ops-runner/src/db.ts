@@ -43,6 +43,23 @@ export class JobsDatabase {
     this.db.run(
       `CREATE INDEX IF NOT EXISTS idx_jobs_created_at ON jobs(created_at)`,
     );
+
+    this.db.run(`
+      CREATE TABLE IF NOT EXISTS runs (
+        id TEXT PRIMARY KEY,
+        action_type TEXT NOT NULL,
+        status TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        started_at TEXT,
+        completed_at TEXT,
+        summary TEXT,
+        result_text TEXT,
+        error_text TEXT,
+        cancel_requested INTEGER NOT NULL DEFAULT 0
+      )
+    `);
+    this.db.run(`CREATE INDEX IF NOT EXISTS idx_runs_status ON runs(status)`);
+    this.db.run(`CREATE INDEX IF NOT EXISTS idx_runs_created_at ON runs(created_at)`);
   }
 
   getJob(id: string): Job | null {
@@ -127,5 +144,80 @@ export class JobsDatabase {
 
   close(): void {
     this.db.close();
+  }
+
+  createRun(input: {
+    id: string;
+    actionType: string;
+    status: 'queued' | 'running' | 'completed' | 'failed' | 'cancelled';
+    createdAt: string;
+    summary?: string;
+  }): void {
+    const stmt = this.db.prepare(`
+      INSERT INTO runs (id, action_type, status, created_at, summary)
+      VALUES (?, ?, ?, ?, ?)
+    `);
+    stmt.run(
+      input.id,
+      input.actionType,
+      input.status,
+      input.createdAt,
+      input.summary || null,
+    );
+  }
+
+  updateRun(
+    id: string,
+    updates: Partial<{
+      status: 'queued' | 'running' | 'completed' | 'failed' | 'cancelled';
+      startedAt: string;
+      completedAt: string;
+      resultText: string;
+      errorText: string;
+      cancelRequested: boolean;
+    }>,
+  ): void {
+    const setClauses: string[] = [];
+    const values: (string | number)[] = [];
+
+    if (updates.status) {
+      setClauses.push('status = ?');
+      values.push(updates.status);
+    }
+    if (updates.startedAt) {
+      setClauses.push('started_at = ?');
+      values.push(updates.startedAt);
+    }
+    if (updates.completedAt) {
+      setClauses.push('completed_at = ?');
+      values.push(updates.completedAt);
+    }
+    if (typeof updates.resultText === 'string') {
+      setClauses.push('result_text = ?');
+      values.push(updates.resultText);
+    }
+    if (typeof updates.errorText === 'string') {
+      setClauses.push('error_text = ?');
+      values.push(updates.errorText);
+    }
+    if (typeof updates.cancelRequested === 'boolean') {
+      setClauses.push('cancel_requested = ?');
+      values.push(updates.cancelRequested ? 1 : 0);
+    }
+
+    if (setClauses.length === 0) return;
+    values.push(id);
+    const sql = `UPDATE runs SET ${setClauses.join(', ')} WHERE id = ?`;
+    (this.db as any).run(sql, ...values);
+  }
+
+  getRun(id: string): Record<string, unknown> | null {
+    const stmt = this.db.prepare('SELECT * FROM runs WHERE id = ?');
+    return (stmt.get(id) as Record<string, unknown> | null) || null;
+  }
+
+  listRuns(limit: number = 20): Record<string, unknown>[] {
+    const stmt = this.db.prepare('SELECT * FROM runs ORDER BY created_at DESC LIMIT ?');
+    return stmt.all(limit) as Record<string, unknown>[];
   }
 }

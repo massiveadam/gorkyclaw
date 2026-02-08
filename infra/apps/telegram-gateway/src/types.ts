@@ -9,6 +9,9 @@ export const ActionType = z.enum([
   'ssh',
   'obsidian_write',
   'web_fetch',
+  'image_to_text',
+  'voice_to_text',
+  'opencode_serve',
   'notify',
 ]);
 export type ActionType = z.infer<typeof ActionType>;
@@ -25,6 +28,8 @@ const BaseActionSchema = z.object({
   requiresApproval: z.boolean().default(true),
   reason: z.string(),
   timeout: z.number().optional(),
+  executionMode: z.enum(['foreground', 'background']).optional(),
+  parallelGroup: z.string().min(1).optional(),
 });
 
 const SSHActionSchema = BaseActionSchema.extend({
@@ -46,6 +51,24 @@ const WebFetchActionSchema = BaseActionSchema.extend({
   extract: z.string().optional(),
 });
 
+const ImageToTextActionSchema = BaseActionSchema.extend({
+  type: z.literal('image_to_text'),
+  imageUrl: z.string().url(),
+  prompt: z.string().optional(),
+});
+
+const VoiceToTextActionSchema = BaseActionSchema.extend({
+  type: z.literal('voice_to_text'),
+  audioUrl: z.string().url(),
+  language: z.string().optional(),
+});
+
+const OpencodeServeActionSchema = BaseActionSchema.extend({
+  type: z.literal('opencode_serve'),
+  task: z.string().min(1),
+  cwd: z.string().optional(),
+});
+
 const NotifyActionSchema = BaseActionSchema.extend({
   type: z.literal('notify'),
   message: z.string().min(1),
@@ -55,6 +78,9 @@ export const ActionSchema = z.discriminatedUnion('type', [
   SSHActionSchema,
   ObsidianWriteActionSchema,
   WebFetchActionSchema,
+  ImageToTextActionSchema,
+  VoiceToTextActionSchema,
+  OpencodeServeActionSchema,
   NotifyActionSchema,
 ]);
 

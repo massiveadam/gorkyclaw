@@ -31,6 +31,10 @@ export const CONTAINER_MAX_OUTPUT_SIZE = parseInt(
   process.env.CONTAINER_MAX_OUTPUT_SIZE || '10485760',
   10,
 ); // 10MB default
+export const MAX_CONCURRENT_CONTAINERS = parseInt(
+  process.env.MAX_CONCURRENT_CONTAINERS || '4',
+  10,
+);
 export const IPC_POLL_INTERVAL = 1000;
 export const OBSIDIAN_VAULT_PATH = process.env.OBSIDIAN_VAULT_PATH || '';
 export const OBSIDIAN_MEMORY_DIRS = (process.env.OBSIDIAN_MEMORY_DIRS || 'Memory,Projects')
@@ -72,6 +76,7 @@ export const TIMEZONE =
 export const CHANNEL = process.env.CHANNEL || 'whatsapp';
 export const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || '';
 export const TELEGRAM_ADMIN_CHAT_ID = process.env.TELEGRAM_ADMIN_CHAT_ID || '';
+export const PLANNER_BACKEND = (process.env.PLANNER_BACKEND || 'direct').toLowerCase();
 
 // Approval-gated external dispatch (disabled by default)
 export const ENABLE_APPROVED_EXECUTION =
@@ -84,6 +89,8 @@ export const APPROVED_ACTION_WEBHOOK_TIMEOUT_MS = parseInt(
 );
 export const APPROVED_ACTION_WEBHOOK_SECRET =
   process.env.APPROVED_ACTION_WEBHOOK_SECRET || '';
+export const OPS_RUNNER_URL = process.env.OPS_RUNNER_URL || 'http://127.0.0.1:8080';
+export const OPS_RUNNER_SHARED_SECRET = process.env.OPS_RUNNER_SHARED_SECRET || '';
 // Local execution remains opt-in and disabled by default.
 export const ENABLE_LOCAL_APPROVED_EXECUTION =
   (process.env.ENABLE_LOCAL_APPROVED_EXECUTION || 'false').toLowerCase() === 'true';

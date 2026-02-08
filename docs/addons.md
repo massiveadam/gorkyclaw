@@ -6,15 +6,25 @@ Use addons for feature sharing between your instance and your friend's instance.
 
 Create `addons/<feature-name>/` with:
 
+- `addon.json` (required): machine-readable manifest + entrypoints
 - `ADDON.md` (required): what it does + safety notes
 - `env.example` (optional): required env vars as placeholders
 - `install.sh` (optional): idempotent install steps
+- `run.sh` (optional): executable addon hook for approved `addon_run` actions
 
 ## Install an addon
 
 ```bash
 gorky addons
 gorky addon-install <feature-name>
+gorky addon-run <feature-name> "<input>"
+```
+
+## Export / import addon packs
+
+```bash
+gorky export-addons my-addons.tgz
+gorky import-addons my-addons.tgz
 ```
 
 Installer behavior:
@@ -38,3 +48,16 @@ This keeps feature logic shared while secrets stay local.
 - `image-to-text`
 - `voice-to-text`
 - `opencode-serve`
+- `squid-music-downloader`
+
+## Local OpenCode runner (VM)
+
+Use local helper commands:
+
+```bash
+gorky opencode-start
+gorky opencode-status
+gorky opencode-stop
+```
+
+Set `OPENCODE_TASK_COMMAND_TEMPLATE` in `.env` to match your local CLI invocation.

@@ -25,6 +25,11 @@ start_all() {
     exit 1
   fi
 
+  set -a
+  # shellcheck disable=SC1091
+  source .env
+  set +a
+
   mkdir -p infra/data
   npm run build >/dev/null
 
@@ -33,8 +38,13 @@ start_all() {
     --env-file .env -e PORT=3000 -p 3000:3000 openclaw-anthropic-proxy:latest >/dev/null
   docker run -d --name openclaw-runner --restart unless-stopped \
     --env-file .env -e PORT=8080 -p 8080:8080 \
+    --add-host host.docker.internal:host-gateway \
     -v "$HOME/.ssh:/app/keys:ro" -v "$PWD/infra/data:/app/data" \
     nanoclaw-ops-runner:latest >/dev/null
+
+  if [[ "${OPENCODE_LOCAL_AUTOSTART:-false}" == "true" ]]; then
+    ./scripts/opencode-local-start.sh || true
+  fi
 
   sudo systemctl restart nanoclaw
   echo "NanoClaw stack started."
@@ -65,8 +75,15 @@ case "$cmd" in
   self) ./scripts/self-model-report.sh ;;
   addons) ./scripts/addon-list.sh ;;
   addon-install) shift; ./scripts/addon-install.sh "$@" ;;
+  addon-create) shift; ./scripts/addon-create.sh "$@" ;;
+  addon-run) shift; ./scripts/addon-run.sh "$@" ;;
+  export-addons) shift; ./scripts/export-addons.sh "$@" ;;
+  import-addons) shift; ./scripts/import-addons.sh "$@" ;;
+  opencode-start) ./scripts/opencode-local-start.sh ;;
+  opencode-stop) ./scripts/opencode-local-stop.sh ;;
+  opencode-status) ./scripts/opencode-local-status.sh ;;
   *)
-    echo "Usage: gorky [start|stop|restart|status|logs|onboard|self|addons|addon-install <name>]"
+    echo "Usage: gorky [start|stop|restart|status|logs|onboard|self|addons|addon-install <name>|addon-create <name> [purpose]|addon-run <name> [input]|export-addons [file]|import-addons <file>|opencode-start|opencode-stop|opencode-status]"
     exit 1
     ;;
 esac

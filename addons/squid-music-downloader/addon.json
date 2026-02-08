@@ -1,0 +1,33 @@
+{
+  "schemaVersion": 1,
+  "name": "squid-music-downloader",
+  "title": "Squid Music Downloader",
+  "description": "Search albums, stage downloads, copy to server music folder, and trigger beets import with approval-gated execution.",
+  "type": "workflow",
+  "version": "1.0.0",
+  "requiresApprovalByDefault": true,
+  "capabilities": [
+    "addon_run",
+    "ssh_mutate"
+  ],
+  "entrypoints": {
+    "install": "install.sh",
+    "run": "run.sh",
+    "docs": "ADDON.md",
+    "envExample": "env.example"
+  },
+  "env": [
+    { "key": "SQUID_SOURCE_BASE_URL", "required": false },
+    { "key": "SQUID_QUERY_ENDPOINT", "required": false },
+    { "key": "SQUID_DOWNLOAD_COMMAND_TEMPLATE", "required": false },
+    { "key": "SQUID_STAGE_DIR", "required": false },
+    { "key": "SQUID_TARGET_HOST", "required": false },
+    { "key": "SQUID_TARGET_PATH", "required": false },
+    { "key": "SQUID_IMPORT_COMMAND", "required": false },
+    { "key": "SQUID_SSH_USER", "required": false },
+    { "key": "SQUID_SSH_KEY_PATH", "required": false },
+    { "key": "SQUID_CONNECT_TIMEOUT", "required": false },
+    { "key": "SQUID_MAX_RETRIES", "required": false },
+    { "key": "SQUID_ENABLE_EXECUTION", "required": false }
+  ]
+}

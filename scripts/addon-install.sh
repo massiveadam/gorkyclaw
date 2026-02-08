@@ -22,6 +22,10 @@ if [[ ! -f "${ADDON_DIR}/ADDON.md" ]]; then
   exit 1
 fi
 
+if ! node ./scripts/addon-validate.js "${ADDON_DIR}"; then
+  exit 1
+fi
+
 if [[ ! -f .env ]]; then
   cp .env.example .env
   echo "Created .env from .env.example"

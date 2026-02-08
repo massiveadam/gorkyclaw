@@ -24,6 +24,7 @@ import {
   OBSIDIAN_MEMORY_MAX_CHARS,
 } from './config.js';
 import {
+  AgentResponse,
   AvailableGroup,
   runContainerAgent,
   writeGroupsSnapshot,
@@ -234,6 +235,12 @@ function stripPlanBlock(text: string): string {
   return text.replace(/```(?:json)?\s*[\s\S]*?```/i, '').trim();
 }
 
+function extractContainerText(result: AgentResponse | string | null | undefined): string {
+  if (!result) return '';
+  if (typeof result === 'string') return result;
+  return result.userMessage || result.internalLog || '';
+}
+
 async function runAgent(
   group: RegisteredGroup,
   prompt: string,
@@ -289,7 +296,7 @@ async function runAgent(
       return null;
     }
 
-    return output.result;
+    return extractContainerText(output.result);
   } catch (err) {
     logger.error({ group: group.name, err }, 'Agent error');
     return null;

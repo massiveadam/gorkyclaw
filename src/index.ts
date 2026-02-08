@@ -19,8 +19,12 @@ import {
   OBSIDIAN_MEMORY_MAX_SNIPPETS,
   OBSIDIAN_MEMORY_MAX_CHARS,
   ENABLE_APPROVED_EXECUTION,
+  OPS_RUNNER_SHARED_SECRET,
+  OPS_RUNNER_URL,
+  PLANNER_BACKEND,
 } from './config.js';
 import {
+  AgentResponse as ContainerAgentResponse,
   AvailableGroup,
   runContainerAgent,
   writeGroupsSnapshot,
@@ -53,24 +57,55 @@ import {
   type Plan,
 } from './plan-contract.js';
 import {
+  buildIntentFormatterRules,
+  detectWebIntent,
+  isLowQualityWebAnswer,
+} from './web-summary.js';
+import {
   decideActionProposal,
   enqueueActionProposal,
   getActionProposalById,
   getPendingActionProposals,
 } from './action-queue.js';
 import { executeApprovedActions } from './approved-executor.js';
+import {
+  AddonWizardData,
+  AddonWizardField,
+  addonWizardQuestion,
+  applyIndexedAnswers,
+  applyIndexedAnswersToFields,
+  extractAddonWizardData,
+  mergeAddonWizardData,
+  missingAddonWizardFields,
+  parseIndexedAnswers,
+} from './addon-wizard.js';
 
 const GROUP_SYNC_INTERVAL_MS = 24 * 60 * 60 * 1000; // 24 hours
+const RUN_MONITOR_POLL_INTERVAL_MS = parseInt(
+  process.env.RUN_MONITOR_POLL_INTERVAL_MS || '15000',
+  10,
+);
+const RUN_NOTIFY_STATE_PATH = path.join(DATA_DIR, 'run-notify-state.json');
 
 let telegramClient: TelegramClient;
 let lastTimestamp = '';
 let sessions: Session = {};
 let registeredGroups: Record<string, RegisteredGroup> = {};
 let lastAgentTimestamp: Record<string, string> = {};
+let runNotifyState: Record<string, string> = {};
+
+type AddonWizardState = {
+  stage: 'collecting' | 'ready';
+  data: AddonWizardData;
+  lastAsked?: AddonWizardField[];
+};
+
+let addonWizardByChat: Record<string, AddonWizardState> = {};
 // Guards to prevent duplicate loops on reconnect
 let messageLoopRunning = false;
 let ipcWatcherRunning = false;
 let groupSyncTimerStarted = false;
+let runMonitorStarted = false;
 
 async function setTyping(chatId: string, isTyping: boolean): Promise<void> {
   try {
@@ -85,14 +120,17 @@ function loadState(): void {
   const state = loadJson<{
     last_timestamp?: string;
     last_agent_timestamp?: Record<string, string>;
+    addon_wizard_by_chat?: Record<string, AddonWizardState>;
   }>(statePath, {});
   lastTimestamp = state.last_timestamp || '';
   lastAgentTimestamp = state.last_agent_timestamp || {};
+  addonWizardByChat = state.addon_wizard_by_chat || {};
   sessions = loadJson(path.join(DATA_DIR, 'sessions.json'), {});
   registeredGroups = loadJson(
     path.join(DATA_DIR, 'registered_groups.json'),
     {},
   );
+  runNotifyState = loadJson<Record<string, string>>(RUN_NOTIFY_STATE_PATH, {});
   logger.info(
     { groupCount: Object.keys(registeredGroups).length },
     'State loaded',
@@ -103,8 +141,10 @@ function saveState(): void {
   saveJson(path.join(DATA_DIR, 'router_state.json'), {
     last_timestamp: lastTimestamp,
     last_agent_timestamp: lastAgentTimestamp,
+    addon_wizard_by_chat: addonWizardByChat,
   });
   saveJson(path.join(DATA_DIR, 'sessions.json'), sessions);
+  saveJson(RUN_NOTIFY_STATE_PATH, runNotifyState);
 }
 
 function registerGroup(chatId: string, group: RegisteredGroup): void {
@@ -179,11 +219,108 @@ function getAvailableGroups(): AvailableGroup[] {
     }));
 }
 
+async function handleAddonWizardMessage(
+  msg: NewMessage,
+  group: RegisteredGroup,
+): Promise<boolean> {
+  const content = msg.content.trim();
+  const chatId = msg.chat_jid;
+  const existing = addonWizardByChat[chatId];
+  const starts = isAddonCreationIntent(content);
+
+  if (!existing && !starts) return false;
+
+  if (/^(cancel|stop|reset)\b/i.test(content)) {
+    delete addonWizardByChat[chatId];
+    saveState();
+    await sendMessage(chatId, 'Addon setup cancelled.');
+    return true;
+  }
+
+  const state: AddonWizardState =
+    existing ||
+    ({
+      stage: 'collecting',
+      data: {},
+    } as AddonWizardState);
+
+  const indexedAnswers = parseIndexedAnswers(content);
+  if (Object.keys(indexedAnswers).length > 0) {
+    // Numbered replies should map to the exact questions we just asked,
+    // not be reparsed heuristically (which can overwrite unrelated fields).
+    if (state.lastAsked && state.lastAsked.length > 0) {
+      state.data = applyIndexedAnswersToFields(state.data, indexedAnswers, state.lastAsked);
+    } else {
+      state.data = applyIndexedAnswers(state.data, indexedAnswers);
+    }
+  } else {
+    const parsed = extractAddonWizardData(content);
+    state.data = mergeAddonWizardData(state.data, parsed);
+  }
+  const missing = missingAddonWizardFields(state.data);
+
+  if (missing.length > 0) {
+    state.stage = 'collecting';
+    state.lastAsked = missing.slice(0, 2);
+    addonWizardByChat[chatId] = state;
+    saveState();
+    const questions = state.lastAsked.map((f, i) => `${i + 1}. ${addonWizardQuestion(f)}`);
+    await sendMessage(chatId, `Addon setup in progress. I still need:\n${questions.join('\n')}`);
+    return true;
+  }
+
+  state.stage = 'ready';
+  state.lastAsked = undefined;
+  addonWizardByChat[chatId] = state;
+  const data = state.data as Record<AddonWizardField, string>;
+  const plan: Plan = {
+    actions: [
+      {
+        type: 'addon_create',
+        addon: data.name,
+        purpose: data.purpose,
+        reason: `Scaffold addon with inputs=${data.inputs}, source=${data.source}, auth=${data.auth}, target=${data.targetHost}:${data.targetPath}, success=${data.successCriteria}, safety=${data.safety}`,
+        requiresApproval: true,
+      },
+    ],
+  };
+  const proposal = enqueueActionProposal({
+    groupFolder: group.folder,
+    chatJid: chatId,
+    plan,
+    requestText: content,
+  });
+  if (proposal) {
+    await telegramClient.sendApprovalButtons(
+      chatId,
+      `Approval needed\nProposal: ${proposal.id}\n\n${summarizeProposalActions(
+        proposal.actions,
+      )}\n\nChoose: Approve, Deny, or Other reason.`,
+      proposal.id,
+    );
+    await sendMessage(
+      chatId,
+      `Addon config captured for \`${data.name}\`. I proposed scaffold creation and included your config in the reason field.`,
+    );
+  }
+  delete addonWizardByChat[chatId];
+  saveState();
+  return true;
+}
+
 async function processMessage(msg: NewMessage): Promise<void> {
   const group = registeredGroups[msg.chat_jid];
   if (!group) return;
 
   const content = msg.content.trim();
+  const handledByWizard = await handleAddonWizardMessage(msg, group);
+  if (handledByWizard) {
+    // Keep conversation cursor in sync even when wizard intercepts messages.
+    // Otherwise old wizard turns leak into the next planner prompt.
+    lastAgentTimestamp[msg.chat_jid] = msg.timestamp;
+    saveState();
+    return;
+  }
   const isMainGroup = group.folder === MAIN_GROUP_FOLDER;
 
   // Main group responds to all messages; other groups require trigger prefix
@@ -218,86 +355,130 @@ async function processMessage(msg: NewMessage): Promise<void> {
   const response = await runAgent(group, prompt, msg.chat_jid);
   await setTyping(msg.chat_jid, false);
 
-  if (response) {
-    const fallbackWebFetch = buildFallbackWebFetchAction(content);
-    const hasWebFetchAction = response.plan.actions.some((action) => action.type === 'web_fetch');
-    if (fallbackWebFetch && !hasWebFetchAction) {
-      response.plan.actions.push(fallbackWebFetch);
-      logger.info(
-        {
-          group: group.name,
-          inferredUrl: fallbackWebFetch.url,
-          inferredMode: fallbackWebFetch.mode,
-        },
-        'Injected fallback web_fetch action from user message URL/domain',
-      );
-    }
-
-    const proposal = enqueueActionProposal({
-      groupFolder: group.folder,
-      chatJid: msg.chat_jid,
-      plan: response.plan,
-      requestText: content,
-    });
-    if (proposal) {
-      logger.info(
-        {
-          proposalId: proposal.id,
-          group: group.name,
-          actionCount: proposal.actions.length,
-        },
-        'Queued proposed actions for approval-only workflow',
-      );
-      await telegramClient.sendApprovalButtons(
-        msg.chat_jid,
-        `Approval needed\nProposal: ${proposal.id}\n\n${summarizeProposalActions(
-          proposal.actions,
-        )}\n\nChoose: Approve, Deny, or Other reason.`,
-        proposal.id,
-      );
-    }
-
-    lastAgentTimestamp[msg.chat_jid] = msg.timestamp;
-    const assistantText = stripPlainPlanJson(response.reply.trim());
-    const isKnownFallback =
-      assistantText.includes('I could not generate a complete answer. Please retry.');
-    const isWebRefusal =
-      /can't access external websites|cannot access external websites|can(?:not|'t) browse/i.test(
-        assistantText,
-      );
-    const hasWebProposal = Boolean(
-      proposal && proposal.actions.some((action) => action.type === 'web_fetch'),
+  if (!response) {
+    await sendMessage(
+      msg.chat_jid,
+      'Planner unavailable right now (upstream free models are likely rate-limited). Please retry in 30-60 seconds.',
     );
-    if (assistantText.length > 0) {
-      if (!(proposal && (isKnownFallback || isWebRefusal || hasWebProposal))) {
-        await sendMessage(msg.chat_jid, assistantText);
-      }
-    } else if (!proposal) {
-      await sendMessage(msg.chat_jid, 'I could not generate a complete answer. Please retry.');
+    return;
+  }
+
+  const fallbackWebFetch = buildFallbackWebFetchAction(content);
+  const hasWebFetchAction = response.plan.actions.some((action) => action.type === 'web_fetch');
+  if (fallbackWebFetch && !hasWebFetchAction) {
+    response.plan.actions.push(fallbackWebFetch);
+    logger.info(
+      {
+        group: group.name,
+        inferredUrl: fallbackWebFetch.url,
+        inferredMode: fallbackWebFetch.mode,
+      },
+      'Injected fallback web_fetch action from user message URL/domain',
+    );
+  }
+
+  const proposalActions = response.plan.actions.filter(
+    (action) => action.type !== 'reply' && action.type !== 'question',
+  );
+  const questionActions = response.plan.actions.filter(
+    (action): action is Extract<Plan['actions'][number], { type: 'question' }> =>
+      action.type === 'question',
+  );
+  const proposal = enqueueActionProposal({
+    groupFolder: group.folder,
+    chatJid: msg.chat_jid,
+    plan: { actions: proposalActions },
+    requestText: content,
+  });
+  if (proposal) {
+    logger.info(
+      {
+        proposalId: proposal.id,
+        group: group.name,
+        actionCount: proposal.actions.length,
+      },
+      'Queued proposed actions for approval-only workflow',
+    );
+    await telegramClient.sendApprovalButtons(
+      msg.chat_jid,
+      `Approval needed\nProposal: ${proposal.id}\n\n${summarizeProposalActions(
+        proposal.actions,
+      )}\n\nChoose: Approve, Deny, or Other reason.`,
+      proposal.id,
+    );
+  }
+
+  lastAgentTimestamp[msg.chat_jid] = msg.timestamp;
+  const assistantText = stripPlainPlanJson(response.reply.trim());
+  const isKnownFallback =
+    assistantText.includes('I could not generate a complete answer. Please retry.');
+  const isWebRefusal =
+    /can't access external websites|cannot access external websites|can(?:not|'t) browse/i.test(
+      assistantText,
+    );
+  const hasWebProposal = Boolean(
+    proposal && proposal.actions.some((action) => action.type === 'web_fetch'),
+  );
+  const isCommandEcho = looksLikeCommandEcho(assistantText);
+  const commandEchoFallback =
+    'I can help with that, but I should not reply with raw command fragments. ' +
+    'Ask me what you want installed or built, and I will propose actions for approval.';
+  if (questionActions.length > 0) {
+    const lines = questionActions.map((q, idx) => `${idx + 1}. ${q.question}`);
+    await sendMessage(msg.chat_jid, `I need a few details before building this:\n${lines.join('\n')}`);
+  }
+  if (assistantText.length > 0) {
+    if (
+      !(proposal && (isKnownFallback || isWebRefusal || hasWebProposal)) &&
+      questionActions.length === 0
+    ) {
+      await sendMessage(msg.chat_jid, isCommandEcho ? commandEchoFallback : assistantText);
     }
-    if (response.planErrors.length > 0) {
-      logger.warn(
-        { errors: response.planErrors, group: group.name },
-        'Plan required repair',
-      );
-    }
+  } else if (!proposal) {
+    await sendMessage(msg.chat_jid, 'I could not generate a complete answer. Please retry.');
+  }
+  if (response.planErrors.length > 0) {
+    logger.warn(
+      { errors: response.planErrors, group: group.name },
+      'Plan required repair',
+    );
   }
 }
 
 function summarizeProposalActions(actions: Plan['actions']): string {
   return actions
     .map((action, index) => {
+      const modeLine =
+        'executionMode' in action && action.executionMode
+          ? `\nMode: ${action.executionMode}`
+          : '';
+      const groupLine =
+        'parallelGroup' in action && action.parallelGroup
+          ? `\nParallel group: ${action.parallelGroup}`
+          : '';
       switch (action.type) {
         case 'ssh':
-          return `${index + 1}. SSH on ${action.target}\nCommand: ${action.command}\nReason: ${action.reason}`;
+          return `${index + 1}. SSH on ${action.target}\nCommand: ${action.command}\nReason: ${action.reason}${modeLine}${groupLine}`;
         case 'web_fetch':
-          return `${index + 1}. Web fetch (${action.mode})\nURL: ${action.url}\nReason: ${action.reason}`;
+          return `${index + 1}. Web fetch (${action.mode})\nURL: ${action.url}\nReason: ${action.reason}${modeLine}${groupLine}`;
         case 'question':
           return `${index + 1}. Ask question\n${action.question}`;
         case 'obsidian_write':
-          return `${index + 1}. Write note\nPath: ${action.path}`;
+          return `${index + 1}. Write note\nPath: ${action.path}${modeLine}${groupLine}`;
         case 'reply':
           return `${index + 1}. Send reply`;
+        case 'image_to_text':
+          return `${index + 1}. Image to text\nURL: ${action.imageUrl}\nReason: ${action.reason}${modeLine}${groupLine}`;
+        case 'voice_to_text':
+          return `${index + 1}. Voice to text\nURL: ${action.audioUrl}\nReason: ${action.reason}${modeLine}${groupLine}`;
+        case 'opencode_serve':
+          return `${index + 1}. OpenCode serve\nTask: ${action.task}\nReason: ${action.reason}${modeLine}${groupLine}`;
+        case 'addon_install':
+          return `${index + 1}. Install addon\nAddon: ${action.addon}\nReason: ${action.reason}${modeLine}${groupLine}`;
+        case 'addon_create':
+          return `${index + 1}. Create addon\nAddon: ${action.addon}\nPurpose: ${action.purpose}\nReason: ${action.reason}${modeLine}${groupLine}`;
+        case 'addon_run':
+          return `${index + 1}. Run addon\nAddon: ${action.addon}${action.input ? `\nInput: ${action.input}` : ''}\nReason: ${action.reason}${modeLine}${groupLine}`;
         default:
           return `${index + 1}. Unknown action`;
       }
@@ -311,9 +492,11 @@ async function formatExecutionResults(
   results: Awaited<ReturnType<typeof executeApprovedActions>>,
 ): Promise<string> {
   const rewrittenWeb = await rewriteWebResults(requestText, results);
-  const webOnly = results.every((r) => r.actionType === 'web_fetch');
+  const hasWebFetch = results.some((r) => r.actionType === 'web_fetch');
+  const hasSsh = results.some((r) => r.actionType === 'ssh');
+  const webFocused = hasWebFetch && !hasSsh;
 
-  if (webOnly) {
+  if (webFocused) {
     const answer = rewrittenWeb.filter(Boolean).join('\n\n');
     if (answer.trim().length > 0) {
       return answer.trim();
@@ -355,6 +538,8 @@ async function rewriteWebResults(
     const sourceUrl = extractWebSourceUrl(result.output);
     const mirrorText = await fetchReadableMirrorText(sourceUrl, context.isDynamicShell);
     const researchContext = await buildResearchContext(requestText, sourceUrl, context.title);
+    const intent = detectWebIntent(requestText, sourceUrl);
+    const intentRules = buildIntentFormatterRules(intent);
     const prompt = [
       'You are a web summarizer. Produce a direct, useful answer for the user request.',
       'Do not include scraper metadata (URL, HTTP status, content type, command).',
@@ -362,6 +547,7 @@ async function rewriteWebResults(
       'Focus on exactly what the user asked for.',
       'If the page appears JS-rendered or incomplete, explicitly say that and suggest browser mode.',
       'If list extraction exists (like albums), include as many high-confidence items as available.',
+      intentRules,
       '',
       `User request: ${requestText || 'Summarize the page content'}`,
       '',
@@ -383,7 +569,30 @@ async function rewriteWebResults(
     ].join('\n');
 
     const rewrittenText = await runDirectSummaryAgent(prompt);
-    const cleaned = sanitizeWebAnswer(rewrittenText || baseSummary);
+    let cleaned = sanitizeWebAnswer(rewrittenText || baseSummary);
+    if (isLowQualityWebAnswer(cleaned, intent)) {
+      const rewritePrompt = [
+        'Rewrite this draft to satisfy the user request with specific, useful detail.',
+        `Intent: ${intent}`,
+        'Hard rules:',
+        '- Remove all scraper/transport metadata.',
+        '- Keep concrete facts only.',
+        '- Keep the answer readable and complete.',
+        '- Do not mention inability to browse.',
+        '',
+        'Draft:',
+        cleaned,
+        '',
+        'Context (use when helpful):',
+        context.cleanText.slice(0, 4500),
+        '',
+        `Formatter rules:\n${intentRules}`,
+        '',
+        'Return only the final answer.',
+      ].join('\n');
+      const rewrittenOnce = await runDirectSummaryAgent(rewritePrompt);
+      cleaned = sanitizeWebAnswer(rewrittenOnce || cleaned);
+    }
     rewritten.push(cleaned.trim() || baseSummary);
   }
 
@@ -752,6 +961,64 @@ function extractWebContext(raw: string): {
 async function handleApprovalCommand(chatId: string, rawText: string): Promise<boolean> {
   const text = rawText.trim();
 
+  if (/^\/runs(?:@\w+)?(?:\s+\d+)?$/i.test(text)) {
+    const limitMatch = text.match(/(\d+)$/);
+    const limit = limitMatch ? Math.max(1, Math.min(20, parseInt(limitMatch[1], 10))) : 10;
+    const runs = await listRunnerRuns(limit);
+    if (!runs) {
+      await sendMessage(chatId, 'Run tracking is not configured on this instance.');
+      return true;
+    }
+    if (runs.length === 0) {
+      await sendMessage(chatId, 'No tracked background runs.');
+      return true;
+    }
+    const lines = runs.map(
+      (run) => `- ${run.id} | ${run.status} | ${run.actionType} | ${run.summary || '(no summary)'}`,
+    );
+    await sendMessage(chatId, `Background runs:\n${lines.join('\n')}`);
+    return true;
+  }
+
+  const runMatch = text.match(/^\/run(?:@\w+)?\s+([A-Za-z0-9-]+)/i);
+  if (runMatch) {
+    const runId = runMatch[1];
+    const run = await getRunnerRun(runId);
+    if (!run) {
+      await sendMessage(chatId, `Run ${runId} not found or runner API unavailable.`);
+      return true;
+    }
+    const parts = [
+      `Run ${run.id}`,
+      `Status: ${run.status}`,
+      `Type: ${run.actionType}`,
+      run.summary ? `Summary: ${run.summary}` : '',
+      run.startedAt ? `Started: ${run.startedAt}` : '',
+      run.completedAt ? `Completed: ${run.completedAt}` : '',
+      run.result ? `Result:\n${run.result.slice(0, 1500)}` : '',
+      run.error ? `Error:\n${run.error.slice(0, 1000)}` : '',
+    ].filter(Boolean);
+    await sendMessage(chatId, parts.join('\n'));
+    return true;
+  }
+
+  const cancelRunMatch = text.match(/^\/cancel(?:@\w+)?\s+([A-Za-z0-9-]+)/i);
+  if (cancelRunMatch) {
+    const runId = cancelRunMatch[1];
+    const cancelled = await cancelRunnerRun(runId);
+    if (cancelled === null) {
+      await sendMessage(chatId, 'Run tracking is not configured on this instance.');
+      return true;
+    }
+    await sendMessage(
+      chatId,
+      cancelled
+        ? `Cancellation requested for ${runId}.`
+        : `Run ${runId} was not active (or could not be cancelled).`,
+    );
+    return true;
+  }
+
   if (/^\/approvals(?:@\w+)?$/i.test(text)) {
     const pending = getPendingActionProposals(chatId).slice(0, 5);
     if (pending.length === 0) {
@@ -827,6 +1094,159 @@ async function handleApprovalCommand(chatId: string, rawText: string): Promise<b
   }
 
   return false;
+}
+
+type RunnerRun = {
+  id: string;
+  actionType: string;
+  status: string;
+  summary: string | null;
+  startedAt: string | null;
+  completedAt: string | null;
+  result: string | null;
+  error: string | null;
+};
+
+function runnerHeaders(): Record<string, string> | null {
+  if (!OPS_RUNNER_SHARED_SECRET) return null;
+  return {
+    'x-ops-runner-secret': OPS_RUNNER_SHARED_SECRET,
+  };
+}
+
+async function listRunnerRuns(limit: number): Promise<RunnerRun[] | null> {
+  const headers = runnerHeaders();
+  if (!headers) return null;
+  try {
+    const resp = await fetch(`${OPS_RUNNER_URL.replace(/\/$/, '')}/runs?limit=${limit}`, {
+      headers,
+      signal: AbortSignal.timeout(8000),
+    });
+    if (!resp.ok) return [];
+    const data = (await resp.json()) as { runs?: RunnerRun[] };
+    return Array.isArray(data.runs) ? data.runs : [];
+  } catch {
+    return [];
+  }
+}
+
+async function getRunnerRun(runId: string): Promise<RunnerRun | null> {
+  const headers = runnerHeaders();
+  if (!headers) return null;
+  try {
+    const resp = await fetch(`${OPS_RUNNER_URL.replace(/\/$/, '')}/runs/${runId}`, {
+      headers,
+      signal: AbortSignal.timeout(8000),
+    });
+    if (!resp.ok) return null;
+    const data = (await resp.json()) as { run?: RunnerRun };
+    return data.run || null;
+  } catch {
+    return null;
+  }
+}
+
+async function cancelRunnerRun(runId: string): Promise<boolean | null> {
+  const headers = runnerHeaders();
+  if (!headers) return null;
+  try {
+    const resp = await fetch(`${OPS_RUNNER_URL.replace(/\/$/, '')}/runs/${runId}/cancel`, {
+      method: 'POST',
+      headers,
+      signal: AbortSignal.timeout(8000),
+    });
+    if (!resp.ok) return false;
+    const data = (await resp.json()) as { cancelled?: boolean; success?: boolean };
+    return Boolean(data.cancelled || data.success);
+  } catch {
+    return false;
+  }
+}
+
+function isRunTerminal(status: string): boolean {
+  return status === 'completed' || status === 'failed' || status === 'cancelled';
+}
+
+function shouldNotifyRunTransition(previous: string | undefined, next: string): boolean {
+  if (previous === next) return false;
+  if (isRunTerminal(next)) return true;
+  if (!previous && next === 'running') return true;
+  return false;
+}
+
+function formatRunUpdate(run: RunnerRun): string {
+  const lines = [
+    `Background run update`,
+    `Run: ${run.id}`,
+    `Status: ${run.status}`,
+    `Type: ${run.actionType}`,
+    run.summary ? `Summary: ${run.summary}` : '',
+    run.startedAt ? `Started: ${run.startedAt}` : '',
+    run.completedAt ? `Completed: ${run.completedAt}` : '',
+    run.error ? `Error:\n${run.error.slice(0, 1200)}` : '',
+    run.result && isRunTerminal(run.status)
+      ? `Result:\n${run.result.slice(0, 1200)}`
+      : '',
+  ].filter(Boolean);
+  return lines.join('\n');
+}
+
+function compactRunNotifyState(currentRuns: RunnerRun[]): void {
+  const keep = new Set(currentRuns.map((r) => r.id));
+  const keys = Object.keys(runNotifyState);
+  if (keys.length <= 400) return;
+  for (const key of keys) {
+    if (!keep.has(key)) {
+      delete runNotifyState[key];
+    }
+  }
+}
+
+function startRunMonitorLoop(): void {
+  if (runMonitorStarted) return;
+  runMonitorStarted = true;
+
+  if (!OPS_RUNNER_SHARED_SECRET || !TELEGRAM_ADMIN_CHAT_ID) {
+    logger.info('Run monitor disabled: missing OPS_RUNNER_SHARED_SECRET or TELEGRAM_ADMIN_CHAT_ID');
+    return;
+  }
+
+  let inFlight = false;
+  const poll = async () => {
+    if (inFlight) return;
+    inFlight = true;
+    try {
+      const runs = await listRunnerRuns(30);
+      if (!runs) return;
+
+      let stateChanged = false;
+      for (const run of runs) {
+        const previous = runNotifyState[run.id];
+        if (previous !== run.status) {
+          runNotifyState[run.id] = run.status;
+          stateChanged = true;
+        }
+        if (!shouldNotifyRunTransition(previous, run.status)) continue;
+        const detail = (await getRunnerRun(run.id)) || run;
+        await sendMessage(TELEGRAM_ADMIN_CHAT_ID, formatRunUpdate(detail));
+      }
+
+      compactRunNotifyState(runs);
+      if (stateChanged) {
+        saveJson(RUN_NOTIFY_STATE_PATH, runNotifyState);
+      }
+    } catch (err) {
+      logger.warn({ err }, 'Run monitor poll failed');
+    } finally {
+      inFlight = false;
+    }
+  };
+
+  setInterval(() => {
+    void poll();
+  }, RUN_MONITOR_POLL_INTERVAL_MS);
+  void poll();
+  logger.info({ intervalMs: RUN_MONITOR_POLL_INTERVAL_MS }, 'Run monitor started');
 }
 
 async function handleApprovalCallback(chatId: string, data: string): Promise<void> {
@@ -909,6 +1329,12 @@ function stripPlainPlanJson(text: string): string {
   return trimmed;
 }
 
+function extractContainerText(result: ContainerAgentResponse | string | null | undefined): string {
+  if (!result) return '';
+  if (typeof result === 'string') return result;
+  return result.userMessage || result.internalLog || '';
+}
+
 function buildPlanRepairPrompt(): string {
   return (
     'The previous response did not include a valid JSON plan block. ' +
@@ -923,6 +1349,10 @@ interface AgentResponse {
   planErrors: string[];
   newSessionId?: string;
 }
+
+const MODEL_COOLDOWN_MS = parseInt(process.env.MODEL_COOLDOWN_MS || '120000', 10);
+const modelCooldownUntil = new Map<string, number>();
+let modelRotationCursor = 0;
 
 function extractUrlCandidate(text: string): string | null {
   const urlMatch = text.match(/\bhttps?:\/\/[^\s)]+/i);
@@ -951,7 +1381,12 @@ function inferWebFetchMode(text: string, url?: string): 'http' | 'browser' {
   return 'http';
 }
 
-function buildFallbackWebFetchAction(userText: string): Extract<Plan['actions'][number], { type: 'web_fetch' }> | null {
+function buildFallbackWebFetchAction(
+  userText: string,
+): Extract<Plan['actions'][number], { type: 'web_fetch' }> | null {
+  if (isAddonCreationIntent(userText) || looksLikeAddonConfigAnswer(userText)) {
+    return null;
+  }
   const url = extractUrlCandidate(userText);
   if (!url) return null;
   try {
@@ -971,21 +1406,73 @@ function buildFallbackWebFetchAction(userText: string): Extract<Plan['actions'][
   };
 }
 
+function isAddonCreationIntent(text: string): boolean {
+  const normalized = text.toLowerCase();
+
+  const explicitAddonIntent =
+    /\b(addon|feature)\b/i.test(normalized) &&
+    /\b(create|build|make|new|set\s*up|setup|configure)\b/i.test(normalized);
+  if (explicitAddonIntent) return true;
+
+  // Implicit capability-building intent: user asks for an ongoing system/workflow/tool.
+  const buildVerb = /\b(create|build|make|set\s*up|setup|configure|automate)\b/i.test(normalized);
+  const capabilityNoun = /\b(system|workflow|tool|integration|pipeline|agent|bot|command)\b/i.test(
+    normalized,
+  );
+  const ongoingCue = /\b(for me|so i can|whenever|each time|automatically|from now on)\b/i.test(
+    normalized,
+  );
+
+  return buildVerb && capabilityNoun && ongoingCue;
+}
+
+function looksLikeAddonConfigAnswer(text: string): boolean {
+  return /\b(source|site|url|path|folder|target|host|server|search|match|input|output|auth|login|api|token|schedule|retry|limit|timeout|approval|safety|command|success)\b/i.test(
+    text,
+  );
+}
+
 function resolveFreeModel(model: string | undefined): string | null {
   const candidate = (model || '').trim();
-  if (!candidate) return 'google/gemma-3-27b-it:free';
+  if (!candidate) return 'openrouter/free';
   if (candidate === 'openrouter/free' || candidate.includes(':free')) {
     return candidate;
   }
   return null;
 }
 
+function getFreeFallbackModels(): string[] {
+  const preferred = resolveFreeModel(process.env.COMPLETION_MODEL) || 'openrouter/free';
+  const envFallbacks = (process.env.FALLBACK_MODELS || '')
+    .split(',')
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0);
+
+  const all = [
+    ...new Set([
+      'openrouter/free',
+      preferred,
+      ...envFallbacks,
+      'google/gemma-3-27b-it:free',
+      'meta-llama/llama-3.3-70b-instruct:free',
+      'mistralai/mistral-small-3.1-24b-instruct:free',
+    ]),
+  ];
+  const now = Date.now();
+  const available = all.filter((m) => (modelCooldownUntil.get(m) || 0) <= now);
+  const candidates = available.length > 0 ? available : all;
+  if (candidates.length <= 1) return candidates;
+  const offset = modelRotationCursor % candidates.length;
+  modelRotationCursor = (modelRotationCursor + 1) % candidates.length;
+  return [...candidates.slice(offset), ...candidates.slice(0, offset)];
+}
+
 async function runDirectFallbackAgent(prompt: string): Promise<string | null> {
   const baseUrl = process.env.ANTHROPIC_BASE_URL;
   const apiKey = process.env.ANTHROPIC_API_KEY;
   if (!baseUrl || !apiKey) return null;
-  const model = resolveFreeModel(process.env.COMPLETION_MODEL);
-  if (!model) {
+  const preferred = resolveFreeModel(process.env.COMPLETION_MODEL);
+  if (!preferred) {
     return (
       'Planner configuration error: COMPLETION_MODEL must be an OpenRouter free model ' +
       '(for example `google/gemma-3-27b-it:free`).'
@@ -994,53 +1481,96 @@ async function runDirectFallbackAgent(prompt: string): Promise<string | null> {
 
   const endpoint = `${baseUrl.replace(/\/$/, '')}/v1/messages`;
   const guidance =
-    'You are the assistant speaking directly to the user. ' +
-    'Do not mention transport metadata. Respond concisely, then include a fenced JSON block: ```json { \"actions\": [] } ```.';
+    'You are Gorky, a local operations assistant speaking directly to the user. ' +
+    'Never say you received an event. Never mention transport metadata. ' +
+    'When web content is requested, propose a web_fetch action instead of refusing to browse. ' +
+    'Respond briefly and practically, then include exactly one fenced JSON block with schema { "actions": [...] }.';
 
-  try {
-    const resp = await fetch(endpoint, {
-      method: 'POST',
-      headers: {
-        'content-type': 'application/json',
-        'x-api-key': apiKey,
-        'anthropic-version': '2023-06-01',
-      },
-      body: JSON.stringify({
-        model,
-        max_tokens: 512,
-        messages: [
-          {
-            role: 'user',
-            content: `${guidance}\n\nUser message:\n${prompt}`,
-          },
-        ],
-      }),
-    });
+  let sawRateLimit = false;
+  let sawSpendLimit = false;
+  let sawFreePolicyBlock = false;
+  for (const model of getFreeFallbackModels()) {
+    try {
+      const resp = await fetch(endpoint, {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          'x-api-key': apiKey,
+          'anthropic-version': '2023-06-01',
+        },
+        body: JSON.stringify({
+          model,
+          max_tokens: 512,
+          messages: [
+            {
+              role: 'user',
+              content: `${guidance}\n\nUser message:\n${prompt}`,
+            },
+          ],
+        }),
+      });
 
-    if (!resp.ok) {
-      const errorText = await resp.text();
-      logger.warn(
-        { status: resp.status, errorText },
-        'Direct fallback agent request failed',
-      );
-      if (/Free model publication/i.test(errorText)) {
-        return (
-          'OpenRouter blocked this free-model request due to account privacy policy. ' +
-          'Enable Free model publication in https://openrouter.ai/settings/privacy and retry.'
+      if (!resp.ok) {
+        const errorText = await resp.text();
+        logger.warn(
+          { status: resp.status, errorText, model },
+          'Direct fallback agent request failed',
         );
+        if (/Free model publication/i.test(errorText)) {
+          sawFreePolicyBlock = true;
+          modelCooldownUntil.set(model, Date.now() + MODEL_COOLDOWN_MS);
+          continue;
+        }
+        if (resp.status === 402 || /spend limit exceeded/i.test(errorText)) {
+          sawSpendLimit = true;
+          modelCooldownUntil.set(model, Date.now() + MODEL_COOLDOWN_MS * 3);
+        }
+        if (resp.status === 429) {
+          sawRateLimit = true;
+          modelCooldownUntil.set(model, Date.now() + MODEL_COOLDOWN_MS);
+        }
+        continue;
       }
-      return null;
-    }
 
-    const data = (await resp.json()) as {
-      content?: Array<{ text?: string }>;
-    };
-    const text = data.content?.map((c) => c.text || '').join('\n').trim();
-    return text || null;
-  } catch (err) {
-    logger.warn({ err }, 'Direct fallback agent request errored');
-    return null;
+      const data = (await resp.json()) as {
+        content?: Array<{ text?: string }>;
+      };
+      const text = data.content?.map((c) => c.text || '').join('\n').trim();
+      if (text) {
+        return text;
+      }
+    } catch (err) {
+      logger.warn({ err, model }, 'Direct fallback agent request errored');
+      continue;
+    }
   }
+
+  if (sawSpendLimit) {
+    return (
+      'Planner blocked: OpenRouter API key spend limit is exceeded for this key. ' +
+      'Raise/remove key spending limit in OpenRouter, or switch to a different key/model.'
+    );
+  }
+  if (sawFreePolicyBlock) {
+    return (
+      'Planner blocked by OpenRouter free-model privacy policy. ' +
+      'Enable Free model publication in https://openrouter.ai/settings/privacy and retry.'
+    );
+  }
+  if (sawRateLimit) {
+    return 'Planner unavailable right now (OpenRouter free models are temporarily rate-limited). Please retry in 30-60 seconds.';
+  }
+  return null;
+}
+
+function isTerminalPlannerMessage(text: string): boolean {
+  const lower = text.toLowerCase();
+  return (
+    lower.includes('planner unavailable right now') ||
+    lower.includes('planner blocked: openrouter api key spend limit') ||
+    lower.includes('planner blocked by openrouter free-model privacy policy') ||
+    lower.includes('planner configuration error')
+  );
 }
 
 async function runDirectSummaryAgent(prompt: string): Promise<string | null> {
@@ -1049,13 +1579,7 @@ async function runDirectSummaryAgent(prompt: string): Promise<string | null> {
   if (!baseUrl || !apiKey) return null;
 
   const endpoint = `${baseUrl.replace(/\/$/, '')}/v1/messages`;
-  const preferred = resolveFreeModel(process.env.COMPLETION_MODEL) || 'google/gemma-3-27b-it:free';
-  const candidates = [...new Set([
-    preferred,
-    'google/gemma-3-27b-it:free',
-    'meta-llama/llama-3.3-70b-instruct:free',
-    'mistralai/mistral-small-3.1-24b-instruct:free',
-  ])];
+  const candidates = getFreeFallbackModels();
 
   for (const model of candidates) {
     try {
@@ -1111,11 +1635,53 @@ function isWeakWebSummary(text: string): boolean {
   return false;
 }
 
+function looksLikeCommandEcho(text: string): boolean {
+  const trimmed = text.trim();
+  if (!trimmed || trimmed.length > 140) return false;
+  if (/^gorky\s+[a-z0-9_-]+/i.test(trimmed)) return true;
+  if (/^(addon-install|addon-create|addon-list|npm|docker|ssh|curl)\b/i.test(trimmed)) return true;
+  return false;
+}
+
 async function runDirectPlanRepair(): Promise<Plan | null> {
   const directReply = await runDirectFallbackAgent(buildPlanRepairPrompt());
   if (!directReply) return null;
   const parsed = parsePlanFromText(directReply);
   return parsed.plan;
+}
+
+async function buildDirectAgentResponse(
+  prompt: string,
+  sessionId?: string,
+): Promise<AgentResponse | null> {
+  const directReply = await runDirectFallbackAgent(prompt);
+  if (!directReply) {
+    return null;
+  }
+  if (isTerminalPlannerMessage(directReply)) {
+    return {
+      reply: directReply,
+      plan: EMPTY_PLAN,
+      planErrors: [],
+      newSessionId: sessionId,
+    };
+  }
+  const directParse = parsePlanFromText(directReply);
+  let directPlan = directParse.plan ?? EMPTY_PLAN;
+  let directErrors = [...directParse.errors];
+  if (!directParse.plan) {
+    const repairedPlan = await runDirectPlanRepair();
+    if (repairedPlan) {
+      directPlan = repairedPlan;
+      directErrors = [];
+    }
+  }
+  return {
+    reply: stripPlanBlock(directReply),
+    plan: directPlan,
+    planErrors: directErrors,
+    newSessionId: sessionId,
+  };
 }
 
 async function runAgent(
@@ -1158,6 +1724,24 @@ async function runAgent(
     new Set(Object.keys(registeredGroups)),
   );
 
+  const backend = PLANNER_BACKEND;
+  const useDirectFirst = backend !== 'container';
+  const useContainerFallback = backend !== 'direct';
+
+  if (useDirectFirst) {
+    const directResponse = await buildDirectAgentResponse(prompt, sessionId);
+    if (directResponse) {
+      return directResponse;
+    }
+    if (!useContainerFallback) {
+      logger.warn(
+        { group: group.name, backend },
+        'Direct planner returned no response and container fallback is disabled',
+      );
+      return null;
+    }
+  }
+
   try {
     const invokeAgent = (resumeSessionId?: string) =>
       runContainerAgent(group, {
@@ -1187,30 +1771,11 @@ async function runAgent(
         { group: group.name, error: output.error },
         'Container agent error',
       );
-      const directReply = await runDirectFallbackAgent(prompt);
-      if (!directReply) {
-        return null;
-      }
-      const directParse = parsePlanFromText(directReply);
-      let directPlan = directParse.plan ?? EMPTY_PLAN;
-      let directErrors = [...directParse.errors];
-      if (!directParse.plan) {
-        const repairedPlan = await runDirectPlanRepair();
-        if (repairedPlan) {
-          directPlan = repairedPlan;
-          directErrors = [];
-        }
-      }
-      return {
-        reply: stripPlanBlock(directReply),
-        plan: directPlan,
-        planErrors: directErrors,
-        newSessionId: sessionId,
-      };
+      return await buildDirectAgentResponse(prompt, sessionId);
     }
 
     let finalSessionId = output.newSessionId ?? sessionId;
-    let rawReply = output.result || '';
+    let rawReply = extractContainerText(output.result);
     if (
       !rawReply.trim() ||
       rawReply.includes('I could not generate a complete answer. Please retry.')
@@ -1243,7 +1808,8 @@ async function runAgent(
       finalSessionId = repairOutput.newSessionId ?? finalSessionId;
 
       if (repairOutput.status === 'success' && repairOutput.result) {
-        const repairedParse = parsePlanFromText(repairOutput.result);
+        const repairedText = extractContainerText(repairOutput.result);
+        const repairedParse = parsePlanFromText(repairedText);
         if (repairedParse.plan) {
           plan = repairedParse.plan;
         } else {
@@ -1717,6 +2283,7 @@ async function connectTelegram(): Promise<void> {
 
   startIpcWatcher();
   startMessageLoop();
+  startRunMonitorLoop();
 
   logger.info('Connected to Telegram');
 }
