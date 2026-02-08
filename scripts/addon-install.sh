@@ -27,12 +27,21 @@ if [[ ! -f .env ]]; then
   echo "Created .env from .env.example"
 fi
 
+has_line() {
+  local pattern="$1"
+  if command -v rg >/dev/null 2>&1; then
+    rg -q "$pattern" .env
+  else
+    grep -Eq "$pattern" .env
+  fi
+}
+
 if [[ -f "${ADDON_DIR}/env.example" ]]; then
   while IFS= read -r line; do
     line="${line#"${line%%[![:space:]]*}"}"
     [[ -z "$line" || "$line" =~ ^# ]] && continue
     key="${line%%=*}"
-    if ! rg -q "^${key}=" .env; then
+    if ! has_line "^${key}="; then
       echo "$line" >> .env
       echo "Added ${key} to .env (from addon template)"
     fi

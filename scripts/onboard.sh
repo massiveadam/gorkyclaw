@@ -14,10 +14,28 @@ if [[ ! -f ".env" ]]; then
   echo "Created .env from .env.example"
 fi
 
+has_line() {
+  local pattern="$1"
+  if command -v rg >/dev/null 2>&1; then
+    rg -q "$pattern" .env
+  else
+    grep -Eq "$pattern" .env
+  fi
+}
+
+get_value() {
+  local key="$1"
+  if command -v rg >/dev/null 2>&1; then
+    rg "^${key}=" .env | head -n1 | cut -d'=' -f2-
+  else
+    grep -E "^${key}=" .env | head -n1 | cut -d'=' -f2-
+  fi
+}
+
 set_env() {
   local key="$1"
   local value="$2"
-  if rg -q "^${key}=" .env; then
+  if has_line "^${key}="; then
     sed -i "s#^${key}=.*#${key}=${value}#g" .env
   else
     echo "${key}=${value}" >> .env
@@ -110,7 +128,7 @@ echo "- OpenRouter API key"
 echo ""
 
 prompt_required "Telegram bot token" "TELEGRAM_BOT_TOKEN"
-telegram_token="$(rg '^TELEGRAM_BOT_TOKEN=' .env | cut -d'=' -f2-)"
+telegram_token="$(get_value "TELEGRAM_BOT_TOKEN")"
 detected_chat_id="$(detect_telegram_chat_id "$telegram_token")"
 if [[ -n "$detected_chat_id" ]]; then
   set_env "TELEGRAM_ADMIN_CHAT_ID" "$detected_chat_id"
@@ -121,7 +139,7 @@ else
   prompt_required "Telegram admin chat id" "TELEGRAM_ADMIN_CHAT_ID"
 fi
 prompt_required "OpenRouter API key (sk-or-...)" "OPENROUTER_API_KEY"
-set_env "ANTHROPIC_API_KEY" "$(rg '^OPENROUTER_API_KEY=' .env | cut -d'=' -f2-)"
+set_env "ANTHROPIC_API_KEY" "$(get_value "OPENROUTER_API_KEY")"
 
 prompt_optional "Obsidian vault path (optional)" "OBSIDIAN_VAULT_PATH" ""
 prompt_optional "Obsidian memory dirs (comma-separated)" "OBSIDIAN_MEMORY_DIRS" "Memory,Projects"
@@ -134,10 +152,10 @@ set_env "FALLBACK_MODELS" "meta-llama/llama-3.3-70b-instruct:free,mistralai/mist
 set_env "ENABLE_APPROVED_EXECUTION" "true"
 set_env "APPROVED_ACTION_WEBHOOK_URL" "http://127.0.0.1:8080/dispatch"
 
-if ! rg -q '^OPS_RUNNER_SHARED_SECRET=.+$' .env || [[ "$(rg '^OPS_RUNNER_SHARED_SECRET=' .env | cut -d'=' -f2-)" == "CHANGE_ME_RUNNER_SECRET" ]]; then
+if ! has_line '^OPS_RUNNER_SHARED_SECRET=.+$' || [[ "$(get_value "OPS_RUNNER_SHARED_SECRET")" == "CHANGE_ME_RUNNER_SECRET" ]]; then
   set_env "OPS_RUNNER_SHARED_SECRET" "$(gen_secret)"
 fi
-if ! rg -q '^APPROVED_ACTION_WEBHOOK_SECRET=.+$' .env || [[ "$(rg '^APPROVED_ACTION_WEBHOOK_SECRET=' .env | cut -d'=' -f2-)" == "CHANGE_ME_WEBHOOK_SECRET" ]]; then
+if ! has_line '^APPROVED_ACTION_WEBHOOK_SECRET=.+$' || [[ "$(get_value "APPROVED_ACTION_WEBHOOK_SECRET")" == "CHANGE_ME_WEBHOOK_SECRET" ]]; then
   set_env "APPROVED_ACTION_WEBHOOK_SECRET" "$(gen_secret)"
 fi
 

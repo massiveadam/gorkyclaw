@@ -11,6 +11,15 @@ ok() { echo "OK   $*"; }
 warn() { echo "WARN $*"; }
 fail() { echo "FAIL $*"; }
 
+matches() {
+  local pattern="$1"
+  if command -v rg >/dev/null 2>&1; then
+    rg -q "$pattern"
+  else
+    grep -Eq "$pattern"
+  fi
+}
+
 if docker info >/dev/null 2>&1; then
   ok "Docker daemon is reachable"
 else
@@ -25,7 +34,7 @@ else
 fi
 
 for c in openclaw-anthropic-proxy openclaw-runner; do
-  if docker ps --format '{{.Names}}' | rg -q "^${c}$"; then
+  if docker ps --format '{{.Names}}' | matches "^${c}$"; then
     ok "Container '$c' is running"
   else
     warn "Container '$c' is not running"
@@ -40,7 +49,7 @@ else
 fi
 
 for var in TELEGRAM_BOT_TOKEN TELEGRAM_ADMIN_CHAT_ID OPENROUTER_API_KEY ANTHROPIC_BASE_URL; do
-  if rg -q "^${var}=.+$" .env; then
+  if matches "^${var}=.+$" < .env; then
     ok "$var is set"
   else
     warn "$var is missing"

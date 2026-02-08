@@ -7,11 +7,29 @@ cd "$ROOT_DIR"
 REPORT_PATH="${SELF_MODEL_REPORT_PATH:-store/self-model.md}"
 mkdir -p "$(dirname "$REPORT_PATH")"
 
+get_env_value() {
+  local key="$1"
+  if command -v rg >/dev/null 2>&1; then
+    rg "^${key}=" .env | head -n1 | cut -d'=' -f2- || true
+  else
+    grep -E "^${key}=" .env | head -n1 | cut -d'=' -f2- || true
+  fi
+}
+
+match_stream() {
+  local pattern="$1"
+  if command -v rg >/dev/null 2>&1; then
+    rg "$pattern" || true
+  else
+    grep -E "$pattern" || true
+  fi
+}
+
 if [[ -f .env ]]; then
-  free_required="$(rg '^REQUIRE_FREE_MODELS=' .env | cut -d'=' -f2- || true)"
-  reasoning_model="$(rg '^REASONING_MODEL=' .env | cut -d'=' -f2- || true)"
-  completion_model="$(rg '^COMPLETION_MODEL=' .env | cut -d'=' -f2- || true)"
-  approval_exec="$(rg '^ENABLE_APPROVED_EXECUTION=' .env | cut -d'=' -f2- || true)"
+  free_required="$(get_env_value "REQUIRE_FREE_MODELS")"
+  reasoning_model="$(get_env_value "REASONING_MODEL")"
+  completion_model="$(get_env_value "COMPLETION_MODEL")"
+  approval_exec="$(get_env_value "ENABLE_APPROVED_EXECUTION")"
 else
   free_required=""
   reasoning_model=""
@@ -20,8 +38,8 @@ else
 fi
 
 service_state="$(systemctl is-active nanoclaw 2>/dev/null || echo unknown)"
-proxy_state="$(docker ps --format '{{.Names}} {{.Status}}' | rg '^openclaw-anthropic-proxy ' || true)"
-runner_state="$(docker ps --format '{{.Names}} {{.Status}}' | rg '^openclaw-runner ' || true)"
+proxy_state="$(docker ps --format '{{.Names}} {{.Status}}' | match_stream '^openclaw-anthropic-proxy ')"
+runner_state="$(docker ps --format '{{.Names}} {{.Status}}' | match_stream '^openclaw-runner ')"
 
 branch="$(git branch --show-current 2>/dev/null || echo unknown)"
 commit="$(git rev-parse --short HEAD 2>/dev/null || echo unknown)"
