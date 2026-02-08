@@ -55,30 +55,46 @@ gen_secret() {
 
 detect_telegram_chat_id() {
   local token="$1"
-  local response
+  local response=""
   local chat_id=""
+  local i
 
-  response="$(curl -fsS "https://api.telegram.org/bot${token}/getUpdates?limit=1" 2>/dev/null || true)"
-  if [[ -z "$response" ]]; then
-    echo ""
-    return 0
-  fi
+  echo ""
+  echo "Trying to detect your Telegram chat id..."
+  echo "If not already done, open Telegram and send /start to your bot now."
 
-  if command -v jq >/dev/null 2>&1; then
-    chat_id="$(printf '%s' "$response" | jq -r '.result[-1].message.chat.id // .result[-1].channel_post.chat.id // empty' 2>/dev/null || true)"
-  else
-    chat_id="$(printf '%s' "$response" | node -e '
-      const fs = require("fs");
-      try {
-        const d = JSON.parse(fs.readFileSync(0, "utf8"));
-        const r = Array.isArray(d.result) ? d.result : [];
-        const last = r.length ? r[r.length - 1] : {};
-        const id = (last.message && last.message.chat && last.message.chat.id) ||
-                   (last.channel_post && last.channel_post.chat && last.channel_post.chat.id) || "";
-        if (id !== "") process.stdout.write(String(id));
-      } catch {}
-    ' 2>/dev/null || true)"
-  fi
+  # Poll a few times so the user can send a fresh message during onboarding.
+  for i in 1 2 3; do
+    response="$(curl -fsS "https://api.telegram.org/bot${token}/getUpdates?timeout=20&limit=10&allowed_updates=%5B%22message%22,%22edited_message%22,%22channel_post%22%5D" 2>/dev/null || true)"
+    if [[ -z "$response" ]]; then
+      continue
+    fi
+
+    if command -v jq >/dev/null 2>&1; then
+      chat_id="$(printf '%s' "$response" | jq -r '.result | reverse | .[] | (.message.chat.id // .edited_message.chat.id // .channel_post.chat.id // empty) | select(. != null) | tostring' 2>/dev/null | head -n1 || true)"
+    else
+      chat_id="$(printf '%s' "$response" | node -e '
+        const fs = require("fs");
+        try {
+          const d = JSON.parse(fs.readFileSync(0, "utf8"));
+          const r = Array.isArray(d.result) ? d.result.slice().reverse() : [];
+          for (const u of r) {
+            const id = (u.message && u.message.chat && u.message.chat.id) ||
+                       (u.edited_message && u.edited_message.chat && u.edited_message.chat.id) ||
+                       (u.channel_post && u.channel_post.chat && u.channel_post.chat.id);
+            if (id !== undefined && id !== null) {
+              process.stdout.write(String(id));
+              break;
+            }
+          }
+        } catch {}
+      ' 2>/dev/null || true)"
+    fi
+
+    if [[ -n "$chat_id" ]]; then
+      break
+    fi
+  done
 
   printf '%s' "$chat_id"
 }
