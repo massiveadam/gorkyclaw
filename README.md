@@ -22,6 +22,19 @@ claude
 
 Then run `/setup`. Claude Code handles everything: dependencies, authentication, container setup, service configuration.
 
+For Linux Telegram + OpenRouter free-only defaults without Claude setup flow, see:
+
+- `docs/quickstart.md`
+- `docs/upgrade.md`
+- `docs/share-skills.md`
+- `docs/addons.md`
+
+After bootstrap, you can run the whole stack with one command:
+
+```bash
+gorky
+```
+
 ## Philosophy
 
 **Small enough to understand.** One process, a few source files. No microservices, no message queues, no abstraction layers. Have Claude Code walk you through it.

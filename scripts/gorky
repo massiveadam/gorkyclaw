@@ -1,0 +1,58 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$ROOT_DIR"
+
+cmd="${1:-start}"
+
+start_all() {
+  if [[ ! -f ".env" ]]; then
+    echo ".env not found. Run ./scripts/onboard.sh first."
+    exit 1
+  fi
+
+  mkdir -p infra/data
+  npm run build >/dev/null
+
+  docker rm -f openclaw-anthropic-proxy openclaw-runner 2>/dev/null || true
+  docker run -d --name openclaw-anthropic-proxy --restart unless-stopped \
+    --env-file .env -e PORT=3000 -p 3000:3000 openclaw-anthropic-proxy:latest >/dev/null
+  docker run -d --name openclaw-runner --restart unless-stopped \
+    --env-file .env -e PORT=8080 -p 8080:8080 \
+    -v "$HOME/.ssh:/app/keys:ro" -v "$PWD/infra/data:/app/data" \
+    nanoclaw-ops-runner:latest >/dev/null
+
+  sudo systemctl restart nanoclaw
+  echo "NanoClaw stack started."
+  ./scripts/doctor.sh
+}
+
+stop_all() {
+  docker rm -f openclaw-anthropic-proxy openclaw-runner 2>/dev/null || true
+  sudo systemctl stop nanoclaw || true
+  echo "NanoClaw stack stopped."
+}
+
+status_all() {
+  ./scripts/doctor.sh
+}
+
+logs_all() {
+  sudo journalctl -u nanoclaw -f
+}
+
+case "$cmd" in
+  start) start_all ;;
+  stop) stop_all ;;
+  restart) stop_all; start_all ;;
+  status) status_all ;;
+  logs) logs_all ;;
+  onboard) ./scripts/onboard.sh ;;
+  addons) ./scripts/addon-list.sh ;;
+  addon-install) shift; ./scripts/addon-install.sh "$@" ;;
+  *)
+    echo "Usage: gorky [start|stop|restart|status|logs|onboard|addons|addon-install <name>]"
+    exit 1
+    ;;
+esac

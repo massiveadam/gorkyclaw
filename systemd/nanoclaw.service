@@ -1,0 +1,19 @@
+[Unit]
+Description=NanoClaw - Personal AI Assistant
+After=docker.service network.target
+Requires=docker.service
+
+[Service]
+Type=simple
+User=adam
+WorkingDirectory=/home/adam/nanoclaw
+Environment=NODE_ENV=production
+EnvironmentFile=/home/adam/nanoclaw/.env
+ExecStart=/usr/bin/node dist/index.js
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

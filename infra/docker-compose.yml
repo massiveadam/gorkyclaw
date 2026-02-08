@@ -1,0 +1,71 @@
+version: '3.8'
+
+services:
+  anthropic-proxy:
+    build:
+      context: ./apps/anthropic-proxy
+      dockerfile: Dockerfile
+    container_name: openclaw-anthropic-proxy
+    restart: unless-stopped
+    environment:
+      - OPENROUTER_API_KEY=${OPENROUTER_API_KEY}
+      - REASONING_MODEL=${REASONING_MODEL:-google/gemma-3-27b-it:free}
+      - COMPLETION_MODEL=${COMPLETION_MODEL:-google/gemma-3-27b-it:free}
+      - REQUIRE_FREE_MODELS=${REQUIRE_FREE_MODELS:-true}
+      - PORT=3000
+    networks:
+      - openclaw
+    ports:
+      - '3000:3000'
+
+  telegram-gateway:
+    build:
+      context: ./apps/telegram-gateway
+      dockerfile: Dockerfile
+    container_name: openclaw-gateway
+    restart: unless-stopped
+    environment:
+      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
+      - TELEGRAM_ALLOWED_USER_IDS=${TELEGRAM_ALLOWED_USER_IDS}
+      - OPS_RUNNER_URL=http://ops-runner:8080
+      - OPS_RUNNER_SHARED_SECRET=${OPS_RUNNER_SHARED_SECRET}
+      - NANOCALW_URL=${NANOCALW_URL:-http://nanoclaw:3000}
+      - OBSIDIAN_VAULT_PATH=${OBSIDIAN_VAULT_PATH}
+      - DB_PATH=/app/data/jobs.db
+    volumes:
+      - ./data:/app/data
+      - ${OBSIDIAN_VAULT_PATH}:${OBSIDIAN_VAULT_PATH}:rw
+    networks:
+      - openclaw
+    depends_on:
+      - ops-runner
+      - anthropic-proxy
+
+  ops-runner:
+    build:
+      context: ./apps/ops-runner
+      dockerfile: Dockerfile
+    container_name: openclaw-runner
+    restart: unless-stopped
+    environment:
+      - PORT=8080
+      - OPS_RUNNER_SHARED_SECRET=${OPS_RUNNER_SHARED_SECRET}
+      - OPS_RUNNER_WEBHOOK_SECRET=${OPS_RUNNER_WEBHOOK_SECRET}
+      - SSH_KEY_PATH=${SSH_KEY_PATH:-/app/keys/aiops}
+      - SSH_USER=${SSH_USER:-aiops}
+      - SSH_STRICT_HOST_KEY_CHECKING=${SSH_STRICT_HOST_KEY_CHECKING:-accept-new}
+      - TARGET_WILLIAM_IP=${TARGET_WILLIAM_IP}
+      - TARGET_UBUNTU_IP=${TARGET_UBUNTU_IP}
+      - DEFAULT_TIMEOUT=60
+      - DB_PATH=/app/data/jobs.db
+    volumes:
+      - ./data:/app/data
+      - ${OPS_RUNNER_KEYS_HOST_PATH:-./keys}:/app/keys:ro
+    networks:
+      - openclaw
+    ports:
+      - '8080:8080'
+
+networks:
+  openclaw:
+    driver: bridge

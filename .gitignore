@@ -12,6 +12,13 @@ logs/
 # Secrets
 *.keys.json
 .env
+.env.*
+!.env.example
+keys/
+infra/data/
+*.db
+*.sqlite
+*.sqlite3
 
 # OS
 .DS_Store

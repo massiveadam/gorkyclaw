@@ -1,0 +1,17 @@
+{
+  "name": "ops-runner",
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "start": "bun run dist/index.js",
+    "dev": "bun --watch run src/index.ts",
+    "build": "tsc"
+  },
+  "dependencies": {
+    "zod": "^3.22.4"
+  },
+  "devDependencies": {
+    "bun-types": "latest",
+    "typescript": "^5.3.3"
+  }
+}
