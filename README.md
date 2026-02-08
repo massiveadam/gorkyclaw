@@ -13,7 +13,7 @@ A private fork of [NanoClaw](https://github.com/gavrielc/nanoclaw) focused on:
 
 ## Fork Notice
 
-This project is a fork of `gavrielc/nanoclaw`.
+This project is a GitHub-recognized fork of `gavrielc/nanoclaw`.
 
 Core direction in this fork:
 
