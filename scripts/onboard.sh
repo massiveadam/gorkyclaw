@@ -4,6 +4,15 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
+install_user_cli() {
+  mkdir -p "$HOME/.local/bin"
+  ln -sf "$ROOT_DIR/scripts/gorky" "$HOME/.local/bin/gorky"
+  if [[ ":$PATH:" != *":$HOME/.local/bin:"* ]]; then
+    echo 'export PATH="$HOME/.local/bin:$PATH"' >> "$HOME/.bashrc"
+    echo "Added ~/.local/bin to PATH in ~/.bashrc (open new shell or run: source ~/.bashrc)"
+  fi
+}
+
 if [[ ! -f ".env.example" ]]; then
   echo ".env.example not found. Run from repo root."
   exit 1
@@ -13,6 +22,8 @@ if [[ ! -f ".env" ]]; then
   cp .env.example .env
   echo "Created .env from .env.example"
 fi
+
+install_user_cli
 
 has_line() {
   local pattern="$1"
