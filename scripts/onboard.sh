@@ -53,18 +53,57 @@ gen_secret() {
   fi
 }
 
+detect_telegram_chat_id() {
+  local token="$1"
+  local response
+  local chat_id=""
+
+  response="$(curl -fsS "https://api.telegram.org/bot${token}/getUpdates?limit=1" 2>/dev/null || true)"
+  if [[ -z "$response" ]]; then
+    echo ""
+    return 0
+  fi
+
+  if command -v jq >/dev/null 2>&1; then
+    chat_id="$(printf '%s' "$response" | jq -r '.result[-1].message.chat.id // .result[-1].channel_post.chat.id // empty' 2>/dev/null || true)"
+  else
+    chat_id="$(printf '%s' "$response" | node -e '
+      const fs = require("fs");
+      try {
+        const d = JSON.parse(fs.readFileSync(0, "utf8"));
+        const r = Array.isArray(d.result) ? d.result : [];
+        const last = r.length ? r[r.length - 1] : {};
+        const id = (last.message && last.message.chat && last.message.chat.id) ||
+                   (last.channel_post && last.channel_post.chat && last.channel_post.chat.id) || "";
+        if (id !== "") process.stdout.write(String(id));
+      } catch {}
+    ' 2>/dev/null || true)"
+  fi
+
+  printf '%s' "$chat_id"
+}
+
 echo ""
 echo "NanoClaw Onboarding (Telegram + OpenRouter free-only)"
 echo "====================================================="
 echo ""
 echo "Get these before continuing:"
 echo "- Telegram bot token (BotFather)"
-echo "- Telegram chat id (userinfobot)"
+echo "- Open Telegram and message your bot (/start) so chat id can be detected"
 echo "- OpenRouter API key"
 echo ""
 
 prompt_required "Telegram bot token" "TELEGRAM_BOT_TOKEN"
-prompt_required "Telegram admin chat id" "TELEGRAM_ADMIN_CHAT_ID"
+telegram_token="$(rg '^TELEGRAM_BOT_TOKEN=' .env | cut -d'=' -f2-)"
+detected_chat_id="$(detect_telegram_chat_id "$telegram_token")"
+if [[ -n "$detected_chat_id" ]]; then
+  set_env "TELEGRAM_ADMIN_CHAT_ID" "$detected_chat_id"
+  echo "Detected Telegram admin chat id: $detected_chat_id"
+else
+  echo "Could not auto-detect Telegram admin chat id."
+  echo "Message your bot once (e.g. /start), then enter chat id manually."
+  prompt_required "Telegram admin chat id" "TELEGRAM_ADMIN_CHAT_ID"
+fi
 prompt_required "OpenRouter API key (sk-or-...)" "OPENROUTER_API_KEY"
 set_env "ANTHROPIC_API_KEY" "$(rg '^OPENROUTER_API_KEY=' .env | cut -d'=' -f2-)"
 
