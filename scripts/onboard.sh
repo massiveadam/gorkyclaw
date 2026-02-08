@@ -35,9 +35,29 @@ get_value() {
 set_env() {
   local key="$1"
   local value="$2"
+  local tmp_file
+  tmp_file="$(mktemp)"
+
   if has_line "^${key}="; then
-    sed -i "s#^${key}=.*#${key}=${value}#g" .env
+    awk -v k="$key" -v v="$value" '
+      BEGIN { replaced = 0 }
+      $0 ~ ("^" k "=") {
+        if (!replaced) {
+          print k "=" v
+          replaced = 1
+        }
+        next
+      }
+      { print }
+      END {
+        if (!replaced) {
+          print k "=" v
+        }
+      }
+    ' .env > "$tmp_file"
+    mv "$tmp_file" .env
   else
+    rm -f "$tmp_file"
     echo "${key}=${value}" >> .env
   fi
 }
