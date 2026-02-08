@@ -108,9 +108,9 @@ detect_telegram_chat_id() {
   local chat_id=""
   local i
 
-  echo ""
-  echo "Trying to detect your Telegram chat id..."
-  echo "If not already done, open Telegram and send /start to your bot now."
+  >&2 echo ""
+  >&2 echo "Trying to detect your Telegram chat id..."
+  >&2 echo "If not already done, open Telegram and send /start to your bot now."
 
   # Poll a few times so the user can send a fresh message during onboarding.
   for i in 1 2 3; do
@@ -145,7 +145,11 @@ detect_telegram_chat_id() {
     fi
   done
 
-  printf '%s' "$chat_id"
+  if [[ "$chat_id" =~ ^-?[0-9]+$ ]]; then
+    printf '%s' "$chat_id"
+  else
+    printf ''
+  fi
 }
 
 echo ""
