@@ -8,6 +8,7 @@ This repo stores shareable runtime skills in `skills/`.
 
 ## Addon Packs
 
+- `addons/self-model`: local runtime self-introspection snapshot
 - `addons/image-to-text`: OCR capability scaffold
 - `addons/voice-to-text`: speech-to-text scaffold
 - `addons/opencode-serve`: OpenCode `/serve` integration scaffold

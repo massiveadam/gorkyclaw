@@ -49,10 +49,11 @@ case "$cmd" in
   status) status_all ;;
   logs) logs_all ;;
   onboard) ./scripts/onboard.sh ;;
+  self) ./scripts/self-model-report.sh ;;
   addons) ./scripts/addon-list.sh ;;
   addon-install) shift; ./scripts/addon-install.sh "$@" ;;
   *)
-    echo "Usage: gorky [start|stop|restart|status|logs|onboard|addons|addon-install <name>]"
+    echo "Usage: gorky [start|stop|restart|status|logs|onboard|self|addons|addon-install <name>]"
     exit 1
     ;;
 esac

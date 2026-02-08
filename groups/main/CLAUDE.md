@@ -122,6 +122,15 @@ I can restart the nginx container. Do you want me to proceed?
 - Search the web
 - Schedule tasks
 
+### Local Runtime Truth (for "how are you set up?" questions)
+
+- Skills in this project are files/folders under `skills/`
+- Addons in this project are folders under `addons/` with `ADDON.md` (+ optional `env.example`, `install.sh`)
+- Addons are listed with `gorky addons`
+- Addons are installed with `gorky addon-install <name>`
+- Addons are configured per-user in local `.env` (never in git)
+- If available, use `store/self-model.md` as the first source for setup/capability answers
+
 ### Infrastructure (via OpenClaw)
 
 - Execute commands on william and willy-ubuntu

@@ -42,7 +42,7 @@ import {
 import { startSchedulerLoop } from './task-scheduler.js';
 import { NewMessage, RegisteredGroup, Session } from './types.js';
 import { loadJson, saveJson } from './utils.js';
-import { buildUserPrompt } from './prompt.js';
+import { buildAgentGroundingHeader, buildUserPrompt } from './prompt.js';
 import { buildObsidianMemoryHeader } from './obsidian-memory.js';
 import { logger } from './logger.js';
 import {
@@ -204,7 +204,8 @@ async function processMessage(msg: NewMessage): Promise<void> {
     maxSnippets: OBSIDIAN_MEMORY_MAX_SNIPPETS,
     maxChars: OBSIDIAN_MEMORY_MAX_CHARS,
   });
-  const prompt = `${memoryHeader}${userPrompt}`.trim();
+  const groundingHeader = buildAgentGroundingHeader();
+  const prompt = `${groundingHeader}${memoryHeader}${userPrompt}`.trim();
 
   if (!prompt) return;
 

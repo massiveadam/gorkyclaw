@@ -34,6 +34,7 @@ This keeps feature logic shared while secrets stay local.
 
 ## Starter packs included
 
+- `self-model`
 - `image-to-text`
 - `voice-to-text`
 - `opencode-serve`
